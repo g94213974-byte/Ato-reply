@@ -1,2 +1,1 @@
-telethon
-google-generativeai
+requirements.txt

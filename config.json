@@ -1,0 +1,6 @@
+{
+  "bot_enabled": true,
+  "gemini_enabled": true,
+  "typing_delay": 3,
+  "welcome_text": "Welcome Baby 👋"
+}

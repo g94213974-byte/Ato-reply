@@ -1,11 +1,9 @@
-# config.py
 import os
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
 
 # Multiple accounts — define up to 10
-# যে কয়টা দিবেন শুধু সেই কয়টা কাজ করবে (1-10)
 ACCOUNTS = []
 
 # Account 1
@@ -64,7 +62,6 @@ for i in range(1, 11):
     api_hash = locals().get(f"API_HASH_{i}")
     session = locals().get(f"SESSION_{i}")
     
-    # শুধু যদি API_ID > 0 এবং Session খালি না হয় তাহলে যোগ করবে
     if api_id and api_id > 0 and session and session.strip():
         ACCOUNTS.append({
             'api_id': api_id,

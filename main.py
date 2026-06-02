@@ -35,118 +35,162 @@ def health():
 user_client = None
 user_bot_running = False
 user_account_info = None
+user_client_lock = asyncio.Lock()  # ✅ লক যোগ করলাম
 
 async def start_user_client(api_id=None, api_hash=None, session_str=None):
     global user_client, user_bot_running, user_account_info
-    
-    if user_client:
-        try:
-            await user_client.disconnect()
-        except:
-            pass
-        user_client = None
 
-    try:
-        aid = api_id or USER_API_ID
-        ahash = api_hash or USER_API_HASH
-        ssession = session_str or USER_STRING_SESSION
-
-        user_client = TelegramClient(StringSession(ssession), aid, ahash)
-        await user_client.start()
-        me = await user_client.get_me()
-        user_account_info = me
-        print(f"✅ User Account: {me.first_name} (ID: {me.id})")
-        user_bot_running = True
-
-        from telethon import events
-
-        @user_client.on(events.NewMessage(incoming=True))
-        async def auto_reply_handler(event):
-            if not event.is_private:
-                return
-
-            sender = await event.get_sender()
-            sender_id = sender.id
-
-            if sender_id == ADMIN_ID:
-                return
-
-            # ✅ SEEN করে দাও - ডাবল টিক আসবে
+    async with user_client_lock:  # ✅ একসাথে একটাই client চালু হবে
+        # আগের ক্লায়েন্ট থাকলে বন্ধ করো
+        if user_client:
             try:
-                await user_client.send_read_acknowledge(event.message)
+                await user_client.disconnect()
             except:
                 pass
+            user_client = None
+            user_bot_running = False
+            
+            # ✅ ২ সেকেন্ড অপেক্ষা করো যাতে Telegram properly disconnect হয়
+            await asyncio.sleep(2)
 
-            # Block photo
-            if event.message.media and isinstance(event.message.media, MessageMediaPhoto):
-                if get_setting('block_photo_enabled', '1') == '1':
-                    try:
-                        await user_client(BlockRequest(id=sender_id))
-                    except:
-                        pass
+        try:
+            aid = api_id or USER_API_ID
+            ahash = api_hash or USER_API_HASH
+            ssession = session_str or USER_STRING_SESSION
+
+            logger.info(f"Starting user client with API ID: {aid}")
+            
+            user_client = TelegramClient(StringSession(ssession), aid, ahash)
+            
+            # ✅ timeout যোগ করলাম
+            await asyncio.wait_for(user_client.start(), timeout=30)
+            
+            me = await user_client.get_me()
+            user_account_info = me
+            logger.info(f"✅ User Account: {me.first_name} (ID: {me.id})")
+            user_bot_running = True
+
+            from telethon import events
+
+            @user_client.on(events.NewMessage(incoming=True))
+            async def auto_reply_handler(event):
+                if not event.is_private:
                     return
 
-            # Typing time
-            typing_enabled = get_setting('typing_enabled', '1') == '1'
-            typing_duration = int(get_setting('typing_duration', '5'))
+                sender = await event.get_sender()
+                sender_id = sender.id
 
-            msg_text = event.message.text or ""
-            msg_lower = msg_text.lower().strip()
+                if sender_id == ADMIN_ID:
+                    return
 
-            # CHECK REPLIES
-            replies = get_all_replies()
-            matched = False
+                # ✅ SEEN করে দাও - ডাবল টিক আসবে
+                try:
+                    await user_client.send_read_acknowledge(event.message)
+                    logger.info(f"✅ Message marked as read from {sender_id}")
+                except Exception as e:
+                    logger.warning(f"Could not mark as read: {e}")
 
-            for rid, keyword, reply_text, rtype in replies:
-                kw = keyword.lower().strip()
-                if rtype == "exact" and msg_lower == kw:
-                    matched = True
-                    if typing_enabled and typing_duration > 0:
-                        async with user_client.action(event.chat_id, "typing"):
-                            await asyncio.sleep(typing_duration)
-                    await event.respond(reply_text)
-                    break
-                elif rtype == "contains" and kw in msg_lower:
-                    matched = True
-                    if typing_enabled and typing_duration > 0:
-                        async with user_client.action(event.chat_id, "typing"):
-                            await asyncio.sleep(typing_duration)
-                    await event.respond(reply_text)
-                    break
-
-            # NO MATCH
-            if not matched:
-                welcome_enabled = get_setting('welcome_enabled', '1') == '1'
-                
-                if welcome_enabled:
-                    if typing_enabled and typing_duration > 0:
-                        async with user_client.action(event.chat_id, "typing"):
-                            await asyncio.sleep(typing_duration)
-                    
-                    welcome_msg = get_setting('welcome_message', '👋 Welcome!')
-                    welcome_photo = get_setting('welcome_photo', '')
-                    if welcome_photo:
+                # Block photo
+                if event.message.media and isinstance(event.message.media, MessageMediaPhoto):
+                    if get_setting('block_photo_enabled', '1') == '1':
                         try:
-                            await user_client.send_file(sender_id, welcome_photo, caption=welcome_msg)
+                            await user_client(BlockRequest(id=sender_id))
+                            logger.info(f"Blocked user {sender_id} for photo")
                         except:
-                            await event.respond(welcome_msg)
-                    else:
-                        await event.respond(welcome_msg)
-                else:
-                    default_reply_enabled = get_setting('default_reply_enabled', '1') == '1'
-                    if default_reply_enabled:
+                            pass
+                        return
+
+                # Typing time
+                typing_enabled = get_setting('typing_enabled', '1') == '1'
+                typing_duration = int(get_setting('typing_duration', '5'))
+
+                msg_text = event.message.text or ""
+                msg_lower = msg_text.lower().strip()
+
+                # CHECK REPLIES
+                replies = get_all_replies()
+                matched = False
+
+                for rid, keyword, reply_text, rtype in replies:
+                    kw = keyword.lower().strip()
+                    if rtype == "exact" and msg_lower == kw:
+                        matched = True
+                        if typing_enabled and typing_duration > 0:
+                            async with user_client.action(event.chat_id, "typing"):
+                                await asyncio.sleep(typing_duration)
+                        await event.respond(reply_text)
+                        logger.info(f"✅ Replied (exact) to {sender_id}: {keyword}")
+                        break
+                    elif rtype == "contains" and kw in msg_lower:
+                        matched = True
+                        if typing_enabled and typing_duration > 0:
+                            async with user_client.action(event.chat_id, "typing"):
+                                await asyncio.sleep(typing_duration)
+                        await event.respond(reply_text)
+                        logger.info(f"✅ Replied (contains) to {sender_id}: {keyword}")
+                        break
+
+                # NO MATCH
+                if not matched:
+                    welcome_enabled = get_setting('welcome_enabled', '1') == '1'
+                    
+                    if welcome_enabled:
                         if typing_enabled and typing_duration > 0:
                             async with user_client.action(event.chat_id, "typing"):
                                 await asyncio.sleep(typing_duration)
                         
-                        default_reply = get_setting('default_reply_text', 
-                            '🤖 আমি এখনো আপনার প্রশ্ন বুঝতে পারিনি। দয়া করে সঠিকভাবে লিখুন।')
-                        await event.respond(default_reply)
+                        welcome_msg = get_setting('welcome_message', '👋 Welcome!')
+                        welcome_photo = get_setting('welcome_photo', '')
+                        if welcome_photo:
+                            try:
+                                await user_client.send_file(sender_id, welcome_photo, caption=welcome_msg)
+                            except:
+                                await event.respond(welcome_msg)
+                        else:
+                            await event.respond(welcome_msg)
+                        logger.info(f"✅ Welcome sent to {sender_id}")
+                    else:
+                        default_reply_enabled = get_setting('default_reply_enabled', '1') == '1'
+                        if default_reply_enabled:
+                            if typing_enabled and typing_duration > 0:
+                                async with user_client.action(event.chat_id, "typing"):
+                                    await asyncio.sleep(typing_duration)
+                            
+                            default_reply = get_setting('default_reply_text', 
+                                '🤖 আমি এখনো আপনার প্রশ্ন বুঝতে পারিনি। দয়া করে সঠিকভাবে লিখুন।')
+                            await event.respond(default_reply)
+                            logger.info(f"✅ Default reply sent to {sender_id}")
 
-        await user_client.run_until_disconnected()
-    except Exception as e:
-        print(f"User account error: {e}")
-        user_bot_running = False
+            logger.info("✅ User client event handler registered")
+            
+            # ✅ client চালু রাখার জন্য run_until_disconnected() না রান করিয়ে,
+            #    শুধু connected থাকবে event handler কাজ করবে
+            #    আমরা আলাদা task এ ping রাখবো
+            
+        except asyncio.TimeoutError:
+            logger.error("❌ User client start timed out!")
+            user_bot_running = False
+            user_client = None
+        except Exception as e:
+            logger.error(f"❌ User account error: {e}")
+            user_bot_running = False
+            user_client = None
+
+
+async def keep_user_client_alive():
+    """User client কে alive রাখার জন্য periodic ping"""
+    global user_client, user_bot_running
+    while True:
+        try:
+            if user_client and user_bot_running:
+                # Telegram এর সাথে connection check
+                me = await user_client.get_me()
+                if me:
+                    logger.debug(f"User client alive: {me.first_name}")
+        except Exception as e:
+            logger.warning(f"User client ping failed: {e}")
+            user_bot_running = False
+        await asyncio.sleep(60)  # প্রতি ৬০ সেকেন্ডে ping
 
 
 # ========================
@@ -372,7 +416,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting('typing_enabled', new)
         await show_settings_menu(update, context)
 
-    # ✅ TYPING TIME (seconds)
+    # TYPING TIME (seconds)
     elif data == "set_typing_time":
         current = int(get_setting('typing_duration', '5'))
         await query.edit_message_text(
@@ -400,7 +444,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting('typing_duration', str(sec))
         await show_settings_menu(update, context)
 
-    # ✅ CUSTOM TYPING TIME
+    # CUSTOM TYPING TIME
     elif data == "typetime_custom":
         await query.edit_message_text(
             "⏱️ **Custom Typing Duration**\n\n"
@@ -541,13 +585,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Session string খুব ছোট! সঠিক session দিন।")
             return
 
-        await update.message.reply_text("🔄 **Logging in with new account...** দয়া করে অপেক্ষা করুন...", parse_mode='Markdown')
+        await update.message.reply_text(
+            "🔄 **Logging in with new account...**\n\n"
+            "এতে ১০-১৫ সেকেন্ড সময় লাগতে পারে। দয়া করে অপেক্ষা করুন...",
+            parse_mode='Markdown'
+        )
 
         context.user_data['awaiting'] = ''
+
+        # ✅ ব্যাকগ্রাউন্ড টাস্কে login করাও (বট block না করার জন্য)
         asyncio.create_task(start_user_client(api_id, api_hash, session_str))
 
         await update.message.reply_text(
-            "✅ **New account login started!**\n\nকিছুক্ষণের মধ্যে চালু হবে। `/start` দিয়ে চেক করুন।",
+            "✅ **New account login started!**\n\n"
+            "৩০ সেকেন্ডের মধ্যে account চালু হবে। `/start` দিয়ে চেক করুন।",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]]),
             parse_mode='Markdown'
         )
@@ -684,6 +735,7 @@ async def run_bot():
     init_db()
     print("✅ Database ready")
 
+    # ✅ 409 Conflict এড়ানোর জন্য cleanup
     app = Application.builder().token(BOT_TOKEN).build()
 
     # শুধুমাত্র /start আর /cancel — বাকিটা বাটন
@@ -699,8 +751,13 @@ async def run_bot():
     await app.start()
     print("✅ Bot started!")
 
+    # User account start
     asyncio.create_task(start_user_client())
+    
+    # ✅ Keep alive task
+    asyncio.create_task(keep_user_client_alive())
 
+    # ✅ Polling start
     await app.updater.start_polling()
     await asyncio.Event().wait()
 

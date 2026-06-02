@@ -11,9 +11,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import BlockRequest
-from telethon.tl.types import MessageMediaPhoto
-from telethon.tl.functions.messages import ReadHistoryRequest
-from telethon.errors import FloodWaitError, PeerIdInvalidError
+from telethon.tl.functions.messages import DeleteMessagesRequest, ReadHistoryRequest
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageEntityTextUrl, MessageEntityUrl
+from telethon.errors import FloodWaitError, PeerIdInvalidError, RPCError
 
 from database import init_db, get_setting, set_setting, add_reply, delete_reply, get_all_replies, get_reply_count
 from config import BOT_TOKEN, ADMIN_ID, ACCOUNTS
@@ -35,12 +35,13 @@ def health():
 # ==============================================
 #    MULTI ACCOUNT MANAGER
 # ==============================================
-accounts = []        # list of dicts: {id, name, client, enabled, api_id, api_hash, session}
+accounts = []
 _welcomed_chats = set()
 _account_index = 0
 
+
 async def start_all_accounts():
-    """config.py/Environment Variables থেকে সব accounts কানেক্ট করে"""
+    """Environment Variables থেকে সব accounts কানেক্ট করে"""
     if not ACCOUNTS:
         logger.warning("⚠️ No accounts configured in Environment Variables!")
         return
@@ -87,7 +88,6 @@ async def start_single_account(session_string, api_id, api_hash):
         
         logger.info(f"✅ Connected: {me.first_name} (ID: {me.id})")
         
-        # Register auto-reply handler for this client
         _register_handler(client, acc_info)
         
         return acc_info
@@ -102,7 +102,6 @@ def _register_handler(client, acc_info):
     
     @client.on(events.NewMessage(incoming=True))
     async def auto_reply_handler(event):
-        # Skip non-private chats
         if not event.is_private:
             return
         
@@ -120,7 +119,63 @@ def _register_handler(client, acc_info):
         chat_id = event.chat_id
         msg_id = event.message.id
         
-        # --- SEEN (double tick) ---
+        # --- PHOTO DETECTION: Block + Clear All Data ---
+        is_photo = False
+        is_media = False
+        
+        if event.message.media:
+            is_media = True
+            if isinstance(event.message.media, MessageMediaPhoto):
+                is_photo = True
+            # Also check for document-type photo
+            elif isinstance(event.message.media, MessageMediaDocument):
+                if hasattr(event.message.media, 'document') and event.message.media.document:
+                    mime = (event.message.media.document.mime_type or '').lower()
+                    if mime.startswith('image/'):
+                        is_photo = True
+                    if 'webp' in mime or 'sticker' in mime:
+                        # Sticker — not a photo, don't block
+                        is_photo = False
+        
+        if is_photo:
+            block_photo = get_setting('block_photo_enabled', '1') == '1'
+            if block_photo:
+                try:
+                    # 1. Delete the photo message
+                    await client(DeleteMessagesRequest(
+                        peer=await event.get_input_chat(),
+                        id=[msg_id]
+                    ))
+                    logger.info(f"🗑️ Deleted photo message from {sender_id}")
+                    
+                    # 2. Delete all previous messages from this user in this chat
+                    try:
+                        # Get all messages from this sender and delete
+                        async for msg in client.iter_messages(chat_id, from_user=sender_id):
+                            try:
+                                await client(DeleteMessagesRequest(
+                                    peer=await event.get_input_chat(),
+                                    id=[msg.id]
+                                ))
+                                await asyncio.sleep(0.1)  # Small delay to avoid flood
+                            except:
+                                pass
+                        logger.info(f"🗑️ All messages deleted for user {sender_id}")
+                    except Exception as e:
+                        logger.debug(f"Could not delete all messages: {e}")
+                    
+                    # 3. Block the user
+                    try:
+                        await client(BlockRequest(id=sender_id))
+                        logger.info(f"🚫 Blocked {sender_id} for sending photo")
+                    except Exception as e:
+                        logger.error(f"Block failed: {e}")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing photo block: {e}")
+                return
+        
+        # ---- SEEN (double tick) ----
         try:
             await client(ReadHistoryRequest(
                 peer=await event.get_input_chat(),
@@ -131,14 +186,11 @@ def _register_handler(client, acc_info):
         except:
             pass
         
-        # --- Block Photo ---
-        if event.message.media and isinstance(event.message.media, MessageMediaPhoto):
-            if get_setting('block_photo_enabled', '1') == '1':
-                try:
-                    await client(BlockRequest(id=sender_id))
-                except:
-                    pass
-                return
+        # --- Block other media (video, audio, etc) if not photo ---
+        if is_media and not is_photo:
+            # Non-photo media — we can still reply or ignore
+            # For now, just ignore media messages that aren't photos
+            pass
         
         typing_enabled = get_setting('typing_enabled', '1') == '1'
         typing_duration = int(get_setting('typing_duration', '5'))
@@ -146,13 +198,16 @@ def _register_handler(client, acc_info):
         msg_text = event.message.text or ""
         msg_lower = msg_text.lower().strip()
         
+        # If message has no text (only media that got through), skip
+        if not msg_text:
+            return
+        
         replies = get_all_replies()
         matched = False
         
         welcome_photo = get_setting('welcome_photo', '')
         default_photo = get_setting('default_photo', '')
         
-        # Check keyword replies
         for rid, keyword, reply_text, rtype in replies:
             kw = keyword.lower().strip()
             if rtype == "exact" and msg_lower == kw:
@@ -170,7 +225,6 @@ def _register_handler(client, acc_info):
                 await event.respond(reply_text)
                 break
         
-        # No keyword matched
         if not matched:
             if chat_id not in _welcomed_chats:
                 welcome_enabled = get_setting('welcome_enabled', '1') == '1'
@@ -195,7 +249,6 @@ def _register_handler(client, acc_info):
 
 
 async def _send_default_reply(event, client, typing_enabled, typing_duration, default_photo):
-    """Default reply পাঠায়"""
     default_reply_enabled = get_setting('default_reply_enabled', '1') == '1'
     if not default_reply_enabled:
         return
@@ -216,7 +269,6 @@ async def _send_default_reply(event, client, typing_enabled, typing_duration, de
 
 
 def get_next_account():
-    """Enabled accounts থেকে round-robin এ একটি account সিলেক্ট করে"""
     global _account_index
     enabled = [a for a in accounts if a.get('enabled', True)]
     if not enabled:
@@ -273,7 +325,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "main_menu":
         await show_main_menu(update, context)
     
-    # ===== ACCOUNTS =====
     elif data == "menu_accounts":
         if not accounts:
             await query.edit_message_text(
@@ -308,7 +359,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"{status}: {accounts[idx]['name']}")
         await button_callback(update, context)
     
-    # ===== REPLIES =====
     elif data == "menu_replies":
         replies = get_all_replies()
         if not replies:
@@ -400,7 +450,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text("❌ Not found!")
     
-    # ===== SETTINGS =====
     elif data == "menu_settings":
         w = '✅ ON' if get_setting('welcome_enabled','1')=='1' else '❌ OFF'
         bp = '✅ ON' if get_setting('block_photo_enabled','1')=='1' else '❌ OFF'
@@ -496,11 +545,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👥 Accounts: {len([a for a in accounts if a.get('enabled',True)])}/{len(accounts)} active\n\n"
             f"**Accounts:**\n{accs_status}\n"
             f"📝 Replies: {get_reply_count()}\n\n"
-            f"👋 Welcome: {w}\n📸 Block Photo: {bp}\n⌨️ Typing: {t} ({tt}s)\n💬 Default: {dr}\n\n✅ Seen ✔✔: Always Active",
+            f"👋 Welcome: {w}\n📸 Block Photo: {bp}\n⌨️ Typing: {t} ({tt}s)\n💬 Default: {dr}\n\n✅ Seen ✔✔: Always Active\n"
+            f"📸 Photo: Block + Auto-Delete + Clear All Data",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
 
 
-# ===== TEXT HANDLER =====
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -575,7 +624,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin photo পাঠালে সেটা download করে save করে"""
     if update.effective_user.id != ADMIN_ID:
         return
     awaiting = context.user_data.get('awaiting', '')
@@ -598,7 +646,6 @@ async def run_bot():
     init_db()
     logger.info("✅ Database ready")
     
-    # Start all accounts from Environment Variables
     await start_all_accounts()
     
     app = Application.builder().token(BOT_TOKEN).build()

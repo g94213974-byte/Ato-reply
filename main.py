@@ -10,7 +10,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import BlockRequest
-from telethon.tl.types import MessageMediaPhoto
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+from telethon.tl.functions.messages import ReadHistoryRequest
+from telethon.errors import FloodWaitError, PeerIdInvalidError
 
 from database import init_db, get_setting, set_setting, add_reply, delete_reply, get_all_replies, get_reply_count
 from config import BOT_TOKEN, ADMIN_ID, USER_API_ID, USER_API_HASH, USER_STRING_SESSION
@@ -32,6 +34,9 @@ def health():
 user_client = None
 user_bot_running = False
 user_account_info = None
+
+# Track which chats have already received welcome in this session
+_welcomed_chats = set()
 
 async def start_user_client():
     global user_client, user_bot_running, user_account_info
@@ -57,20 +62,37 @@ async def start_user_client():
             if sender_id == ADMIN_ID:
                 return
 
-            # SEEN (ডাবল টিক)
-            try:
-                await user_client.send_read_acknowledge(event.message)
-            except:
-                pass
+            chat_id = event.chat_id
+            msg_id = event.message.id
 
-            # Block photo
-            if event.message.media and isinstance(event.message.media, MessageMediaPhoto):
-                if get_setting('block_photo_enabled', '1') == '1':
-                    try:
-                        await user_client(BlockRequest(id=sender_id))
-                    except:
-                        pass
-                    return
+            # ---- SEEN (double tick) ফিক্সড ----
+            try:
+                await user_client(ReadHistoryRequest(
+                    peer=await event.get_input_chat(),
+                    max_id=msg_id
+                ))
+                logger.debug(f"✅ Marked read for {sender_id}")
+            except FloodWaitError as e:
+                logger.warning(f"Flood wait {e.seconds}s on read")
+                await asyncio.sleep(e.seconds + 1)
+            except PeerIdInvalidError:
+                logger.warning(f"PeerIdInvalid for {sender_id}")
+            except Exception as e:
+                logger.debug(f"Read mark minor: {e}")
+
+            # ---- Block photo ----
+            if event.message.media:
+                is_photo = isinstance(event.message.media, MessageMediaPhoto)
+                is_sticker = hasattr(event.message.media, 'document') and hasattr(event.message.media.document, 'mime_type') and 'sticker' in (event.message.media.document.mime_type or '')
+                
+                if is_photo:
+                    if get_setting('block_photo_enabled', '1') == '1':
+                        try:
+                            await user_client(BlockRequest(id=sender_id))
+                            logger.info(f"🚫 Blocked {sender_id} for photo")
+                        except:
+                            pass
+                        return
 
             typing_enabled = get_setting('typing_enabled', '1') == '1'
             typing_duration = int(get_setting('typing_duration', '5'))
@@ -80,6 +102,9 @@ async def start_user_client():
 
             replies = get_all_replies()
             matched = False
+
+            welcome_photo = get_setting('welcome_photo', '')
+            default_photo = get_setting('default_photo', '')
 
             for rid, keyword, reply_text, rtype in replies:
                 kw = keyword.lower().strip()
@@ -99,25 +124,31 @@ async def start_user_client():
                     break
 
             if not matched:
-                welcome_enabled = get_setting('welcome_enabled', '1') == '1'
-                if welcome_enabled:
-                    if typing_enabled:
-                        async with user_client.action(event.chat_id, "typing"):
-                            await asyncio.sleep(typing_duration)
-                    welcome_msg = get_setting('welcome_message', '👋 Welcome!')
-                    await event.respond(welcome_msg)
-                else:
-                    default_reply_enabled = get_setting('default_reply_enabled', '1') == '1'
-                    if default_reply_enabled:
+                # ---- যদি chat টা new হয়, তাহলে welcome পাঠাই (একবার) ----
+                if chat_id not in _welcomed_chats:
+                    welcome_enabled = get_setting('welcome_enabled', '1') == '1'
+                    if welcome_enabled:
+                        _welcomed_chats.add(chat_id)
                         if typing_enabled:
                             async with user_client.action(event.chat_id, "typing"):
                                 await asyncio.sleep(typing_duration)
-                        default_reply = get_setting('default_reply_text', 
-                            '🤖 আমি এখনো আপনার প্রশ্ন বুঝতে পারিনি।')
-                        await event.respond(default_reply)
+                        welcome_msg = get_setting('welcome_message', '👋 Welcome!')
+                        
+                        if welcome_photo and os.path.exists(welcome_photo):
+                            try:
+                                await user_client.send_file(event.chat_id, welcome_photo, caption=welcome_msg)
+                            except:
+                                await event.respond(welcome_msg)
+                        else:
+                            await event.respond(welcome_msg)
+                    else:
+                        # welcome বন্ধ থাকলে সরাসরি default reply
+                        _welcomed_chats.add(chat_id)
+                        await _send_default_reply(event, user_client, typing_enabled, typing_duration, default_photo)
+                else:
+                    # ---- একবার welcome হয়ে গেছে, এখন default reply পাঠাই ----
+                    await _send_default_reply(event, user_client, typing_enabled, typing_duration, default_photo)
 
-        # ✅ run_until_disconnected USE KORBO NA
-        # Instead we just keep the client alive by pinging
         logger.info("✅ User client started, keeping alive...")
         while True:
             try:
@@ -133,6 +164,25 @@ async def start_user_client():
     except Exception as e:
         logger.error(f"❌ User account error: {e}")
         user_bot_running = False
+
+
+async def _send_default_reply(event, client, typing_enabled, typing_duration, default_photo):
+    """Default reply পাঠায়, সাথে ফটো থাকলে ফটো সহ"""
+    default_reply_enabled = get_setting('default_reply_enabled', '1') == '1'
+    if default_reply_enabled:
+        if typing_enabled:
+            async with client.action(event.chat_id, "typing"):
+                await asyncio.sleep(typing_duration)
+        default_reply = get_setting('default_reply_text',
+            '🤖 আমি এখনো আপনার প্রশ্ন বুঝতে পারিনি।')
+        
+        if default_photo and os.path.exists(default_photo):
+            try:
+                await client.send_file(event.chat_id, default_photo, caption=default_reply)
+            except:
+                await event.respond(default_reply)
+        else:
+            await event.respond(default_reply)
 
 
 # ==============================================
@@ -171,7 +221,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 
-# ===== All menu handlers in one go =====
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -284,25 +333,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [
             [InlineKeyboardButton(f"👋 Welcome {w}", callback_data="tw")],
             [InlineKeyboardButton("✏️ Welcome Text", callback_data="swt")],
+            [InlineKeyboardButton("🖼️ Welcome Photo", callback_data="swp")],
             [InlineKeyboardButton(f"📸 Block Photo {bp}", callback_data="tbp")],
             [InlineKeyboardButton(f"⌨️ Typing {t}", callback_data="tty")],
             [InlineKeyboardButton(f"⏱️ Typing {tt}s", callback_data="stt")],
             [InlineKeyboardButton(f"💬 Default Reply {dr}", callback_data="tdr")],
             [InlineKeyboardButton("✏️ Default Text", callback_data="sdrt")],
+            [InlineKeyboardButton("🖼️ Default Photo", callback_data="sdp")],
             [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]
         ]
         await query.edit_message_text(
-            "⚙️ **Settings**\n\n✅ Seen (✔✔): Always ON\n✅ Anti-Spam: Removed",
+            "⚙️ **Settings**\n\nSelect an option below:",
             reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data == "tw":
         cur = get_setting('welcome_enabled','1')
         set_setting('welcome_enabled', '0' if cur=='1' else '1')
-        await button_callback(update, context) # refresh
+        await button_callback(update, context)
 
     elif data == "swt":
         await query.edit_message_text("✏️ Welcome message লিখুন:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_settings")]]))
         context.user_data['awaiting'] = 'welcome_text'
+
+    elif data == "swp":
+        await query.edit_message_text("🖼️ Welcome photo এর file path দিন (যেমন: /home/user/welcome.jpg)\n\nঅথবা photo টি Send করুন।", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_settings")]]))
+        context.user_data['awaiting'] = 'welcome_photo'
+
+    elif data == "sdp":
+        await query.edit_message_text("🖼️ Default reply photo এর file path দিন:\n\nঅথবা photo টি Send করুন।", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_settings")]]))
+        context.user_data['awaiting'] = 'default_photo'
 
     elif data == "tbp":
         cur = get_setting('block_photo_enabled','1')
@@ -354,7 +413,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ac = f"👤 {user_account_info.first_name}\n"
         await query.edit_message_text(
             f"📊 **Status**\n\n🤖 UserBot: {'✅ Running' if user_bot_running else '❌ Stopped'}\n{ac}📝 Replies: {get_reply_count()}\n\n"
-            f"👋 Welcome: {w}\n📸 Block Photo: {bp}\n⌨️ Typing: {t} ({tt}s)\n💬 Default: {dr}\n\n✅ Seen ✔✔: Always\n✅ Anti-Spam: Removed",
+            f"👋 Welcome: {w}\n📸 Block Photo: {bp}\n⌨️ Typing: {t} ({tt}s)\n💬 Default: {dr}\n\n✅ Seen ✔✔: Always Active",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
 
 
@@ -400,6 +459,18 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ শুধু সংখ্যা!")
         return
 
+    elif awaiting == 'welcome_photo':
+        set_setting('welcome_photo', text)
+        context.user_data['awaiting'] = ''
+        await update.message.reply_text("✅ Welcome photo path set!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_settings")]]))
+        return
+
+    elif awaiting == 'default_photo':
+        set_setting('default_photo', text)
+        context.user_data['awaiting'] = ''
+        await update.message.reply_text("✅ Default reply photo path set!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_settings")]]))
+        return
+
     if awaiting == 'keyword':
         context.user_data['add_keyword'] = text
         context.user_data['awaiting'] = 'reply_type'
@@ -437,6 +508,34 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Error: {context.error}")
 
+
+# ===== Photo handler via Telegram Bot =====
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """যখন Admin photo পাঠায়, সেটা ডাউনলোড করে path সেভ করে"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    awaiting = context.user_data.get('awaiting', '')
+    if awaiting in ('welcome_photo', 'default_photo'):
+        photo = update.message.photo[-1]  # highest res
+        file = await photo.get_file()
+        # Download to a local path
+        os.makedirs('photos', exist_ok=True)
+        ext = 'jpg'
+        fname = f"photos/{awaiting}_{photo.file_id[:20]}.{ext}"
+        await file.download_to_drive(fname)
+        if awaiting == 'welcome_photo':
+            set_setting('welcome_photo', fname)
+            await update.message.reply_text(f"✅ Welcome photo saved!\nPath: `{fname}`", parse_mode='Markdown')
+        else:
+            set_setting('default_photo', fname)
+            await update.message.reply_text(f"✅ Default photo saved!\nPath: `{fname}`", parse_mode='Markdown')
+        context.user_data['awaiting'] = ''
+        context.user_data.pop('awaiting', None)
+    else:
+        # Plain photo with no awaiting state — ignore or could save as reply photo
+        pass
+
+
 async def run_bot():
     init_db()
     logger.info("✅ Database ready")
@@ -446,6 +545,7 @@ async def run_bot():
     app.add_handler(CommandHandler("cancel", cancel_command, filters=filters.User(ADMIN_ID)))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), text_handler))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.User(ADMIN_ID), photo_handler))
     app.add_error_handler(error_handler)
 
     await app.initialize()
@@ -457,8 +557,7 @@ async def run_bot():
 
     # Polling start
     await app.updater.start_polling()
-    
-    # Keep running
+
     try:
         await asyncio.Event().wait()
     finally:

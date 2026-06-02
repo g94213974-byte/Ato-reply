@@ -34,7 +34,7 @@ def health():
 # ===== User Account =====
 user_client = None
 user_bot_running = False
-user_account_info = None  # ✅ নতুন যোগ: account info রাখার জন্য
+user_account_info = None
 
 async def start_user_client():
     global user_client, user_bot_running, user_account_info
@@ -42,7 +42,7 @@ async def start_user_client():
         user_client = TelegramClient(StringSession(USER_STRING_SESSION), USER_API_ID, USER_API_HASH)
         await user_client.start()
         me = await user_client.get_me()
-        user_account_info = me  # ✅ account info save
+        user_account_info = me
         logger.info(f"✅ User Account: {me.first_name} (ID: {me.id})")
         user_bot_running = True
 
@@ -59,13 +59,11 @@ async def start_user_client():
             if sender_id == ADMIN_ID:
                 return
 
-            # ✅ SEEN (ডাবল টিক) - message পড়া হয়েছে বলে mark করে দেয়
+            # ✅ SEEN (ডাবল টিক) 
             try:
                 await user_client.send_read_acknowledge(event.message)
             except:
                 pass
-
-            # ✅ ANTI-SPAM সরিয়ে দেওয়া হয়েছে (পুরো block টা delete)
 
             # Block photo
             if event.message.media and isinstance(event.message.media, MessageMediaPhoto):
@@ -78,12 +76,12 @@ async def start_user_client():
 
             # Typing time
             typing_enabled = get_setting('typing_enabled', '1') == '1'
-            typing_duration = int(get_setting('typing_duration', '5'))  # ✅ ডিফল্ট 5 সেকেন্ড
+            typing_duration = int(get_setting('typing_duration', '5'))
 
             msg_text = event.message.text or ""
             msg_lower = msg_text.lower().strip()
 
-            # ===== CHECK REPLIES (keyword match) =====
+            # CHECK REPLIES
             replies = get_all_replies()
             matched = False
 
@@ -95,6 +93,7 @@ async def start_user_client():
                         async with user_client.action(event.chat_id, "typing"):
                             await asyncio.sleep(typing_duration)
                     await event.respond(reply_text)
+                    logger.info(f"✅ Replied (exact) to {sender_id}")
                     break
                 elif rtype == "contains" and kw in msg_lower:
                     matched = True
@@ -102,9 +101,10 @@ async def start_user_client():
                         async with user_client.action(event.chat_id, "typing"):
                             await asyncio.sleep(typing_duration)
                     await event.respond(reply_text)
+                    logger.info(f"✅ Replied (contains) to {sender_id}")
                     break
 
-            # ===== NO MATCH =====
+            # NO MATCH
             if not matched:
                 welcome_enabled = get_setting('welcome_enabled', '1') == '1'
                 
@@ -122,6 +122,7 @@ async def start_user_client():
                             await event.respond(welcome_msg)
                     else:
                         await event.respond(welcome_msg)
+                    logger.info(f"✅ Welcome sent to {sender_id}")
                 
                 else:
                     default_reply_enabled = get_setting('default_reply_enabled', '1') == '1'
@@ -134,25 +135,16 @@ async def start_user_client():
                             '🤖 আমি এখনো আপনার প্রশ্ন বুঝতে পারিনি। দয়া করে সঠিকভাবে লিখুন।')
                         await event.respond(default_reply)
 
-        # ✅ run_until_disconnected ব্যবহার না করে ping রাখা
-        while True:
-            try:
-                await asyncio.sleep(30)
-                me = await user_client.get_me()
-                if me:
-                    logger.debug(f"User client alive: {me.first_name}")
-            except:
-                logger.warning("User client ping failed")
-                user_bot_running = False
-                break
-
+        # ✅ run_until_disconnected ব্যবহার করছি - এটা event handler চালু রাখবে
+        await user_client.run_until_disconnected()
+        
     except Exception as e:
         logger.error(f"User account error: {e}")
         user_bot_running = False
 
 
 # ====================================================
-#    BOT COMMANDS + LOGIN (শুধু বাটন)
+#    BOT BUTTONS + LOGIN
 # ====================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -172,7 +164,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🗑 Delete Reply", callback_data="menu_del_reply")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings")],
         [InlineKeyboardButton("📊 Status", callback_data="menu_status")],
-        [InlineKeyboardButton("🔐 Login New Account", callback_data="menu_login")]  # ✅ নতুন বাটন
+        [InlineKeyboardButton("🔐 Login New Account", callback_data="menu_login")]
     ]
     text = (
         "🤖 **UserBot Control Panel**\n\n"
@@ -194,11 +186,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
 
-    # ===== MAIN MENU =====
     if data == "main_menu":
         await show_main_menu(update, context)
 
-    # ===== ✅ LOGIN NEW ACCOUNT =====
+    # ===== LOGIN =====
     elif data == "menu_login":
         await query.edit_message_text(
             "🔐 **Login New Account - Step 1/3**\n\n"
@@ -208,12 +199,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data['awaiting'] = 'login_api_id'
 
-    # ===== REPLIES LIST =====
     elif data == "menu_replies":
         replies = get_all_replies()
         if not replies:
             await query.edit_message_text(
-                "📭 **No replies yet!**\n\n+ Add Reply বাটনে ক্লিক করুন।",
+                "📭 **No replies yet!**\n\n➕ Add Reply বাটনে ক্লিক করুন।",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]),
                 parse_mode='Markdown'
             )
@@ -248,7 +238,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['reply_page'] = int(data.split("_")[2])
         await button_callback(update, context)
 
-    # ===== ADD REPLY =====
     elif data == "menu_add_reply":
         await query.edit_message_text(
             "➕ **Add Reply - Step 1/3**\n\n"
@@ -284,7 +273,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data['awaiting'] = 'reply_text'
 
-    # ===== DELETE REPLY =====
     elif data == "menu_del_reply":
         replies = get_all_replies()
         if not replies:
@@ -333,7 +321,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]])
             )
 
-    # ===== SETTINGS =====
     elif data == "menu_settings":
         await show_settings_menu(update, context)
 
@@ -368,15 +355,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting('block_photo_enabled', new)
         await show_settings_menu(update, context)
 
-    # ✅ Anti-Spam toggle সরিয়ে দেওয়া হয়েছে
-
     elif data == "toggle_typing":
         current = get_setting('typing_enabled', '1')
         new = '0' if current == '1' else '1'
         set_setting('typing_enabled', new)
         await show_settings_menu(update, context)
 
-    # ✅ Typing Time (সেকেন্ডে - কাস্টমাইজেবল)
     elif data == "set_typing_time":
         current = int(get_setting('typing_duration', '5'))
         await query.edit_message_text(
@@ -404,7 +388,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting('typing_duration', str(sec))
         await show_settings_menu(update, context)
 
-    # ✅ Custom typing time
     elif data == "typetime_custom":
         await query.edit_message_text(
             "⏱️ **Custom Typing Duration**\n\n"
@@ -414,7 +397,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data['awaiting'] = 'custom_typing_time'
 
-    # ===== ডিফল্ট রিপ্লাই =====
     elif data == "toggle_default_reply":
         current = get_setting('default_reply_enabled', '1')
         new = '0' if current == '1' else '1'
@@ -423,7 +405,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "set_default_reply_text":
         current_default = get_setting('default_reply_text', 
-            '🤖 আমি এখনো আপনার প্রশ্ন বুঝতে পারিনি। দয়া করে সঠিকভাবে লিখুন।')
+            '🤖 আমি এখনো您的 প্রশ্ন বুঝতে পারিনি। দয়া করে সঠিকভাবে লিখুন।')
         await query.edit_message_text(
             f"✏️ **Set Default Reply**\n\n"
             f"বর্তমান ডিফল্ট রিপ্লাই:\n`{current_default}`\n\n"
@@ -435,14 +417,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data['awaiting'] = 'default_reply_text'
 
-    # ===== STATUS =====
     elif data == "menu_status":
         welcome = '✅ ON' if get_setting('welcome_enabled') == '1' else '❌ OFF'
         blockphoto = '✅ ON' if get_setting('block_photo_enabled') == '1' else '❌ OFF'
         typing = '✅ ON' if get_setting('typing_enabled') == '1' else '❌ OFF'
         typing_time = int(get_setting('typing_duration', '5'))
         default_reply = '✅ ON' if get_setting('default_reply_enabled') == '1' else '❌ OFF'
-        
         default_reply_text = get_setting('default_reply_text', 
             '🤖 আমি এখনো আপনার প্রশ্ন বুঝতে পারিনি।')
 
@@ -462,7 +442,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏱️ Duration: {typing_time} sec\n"
             f"💬 Default Reply: {default_reply}\n"
             f"📄 Default Text: {default_reply_text[:40]}...\n\n"
-            f"✅ **Seen (✔✔ ডাবল টিক): সবসময় Active**\n"
+            f"✅ **Seen (✔✔): সবসময় Active**\n"
             f"✅ **Anti-Spam: সরিয়ে দেওয়া হয়েছে**",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]]),
             parse_mode='Markdown'
@@ -510,7 +490,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     awaiting = context.user_data.get('awaiting', '')
     text = update.message.text.strip()
 
-    # ===== ✅ LOGIN FLOW =====
+    # LOGIN FLOW
     if awaiting == 'login_api_id':
         try:
             api_id = int(text)
@@ -558,7 +538,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data['awaiting'] = ''
         
-        # ✅ config এ session আপডেট করা গেলে restart প্রয়োজন
         await update.message.reply_text(
             "✅ **New account credentials received!**\n\n"
             "⚠️ **গুরুত্বপূর্ণ:** Render এ গিয়ে Environment Variables আপডেট করুন:\n"
@@ -571,7 +550,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ===== ✅ CUSTOM TYPING TIME =====
     elif awaiting == 'custom_typing_time':
         try:
             sec = int(text)
@@ -589,7 +567,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ শুধু সংখ্যা দিন (যেমন: 7, 12, 30)")
         return
 
-    # NORMAL FLOW
     if awaiting == 'keyword':
         keyword = text
         if not keyword:
@@ -704,26 +681,18 @@ async def run_bot():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", start, filters=filters.User(ADMIN_ID)))
     app.add_handler(CommandHandler("cancel", cancel_command, filters=filters.User(ADMIN_ID)))
 
-    # Callbacks (button clicks)
     app.add_handler(CallbackQueryHandler(button_callback))
-
-    # Text messages
     app.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), text_handler))
-
-    # Photos
     app.add_handler(MessageHandler(filters.PHOTO & filters.User(ADMIN_ID), photo_handler))
-
     app.add_error_handler(error_handler)
 
     await app.initialize()
     await app.start()
     logger.info("✅ Bot started!")
 
-    # Start user account
     asyncio.create_task(start_user_client())
 
     await app.updater.start_polling()
@@ -731,21 +700,16 @@ async def run_bot():
 
 
 def run_flask():
-    """Flask চালানো (Render এর জন্য)"""
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 
 def run_main():
-    """Main function"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(run_bot())
 
 
-# ===== Entry Point =====
 if __name__ == "__main__":
-    # Flask thread
     t = Thread(target=run_flask, daemon=True)
     t.start()
-    # Main bot
     run_main()

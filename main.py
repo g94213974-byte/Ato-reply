@@ -141,7 +141,6 @@ async def start_user_client():
                 
                 else:
                     # Welcome বন্ধ থাকলে Default Reply পাঠাবে
-                    # ===== ⭐ ডিফল্ট রিপ্লাই ⭐ =====
                     default_reply_enabled = get_setting('default_reply_enabled', '1') == '1'
                     if default_reply_enabled:
                         if typing_enabled:
@@ -393,7 +392,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting('typing_duration', str(sec))
         await show_settings_menu(update, context)
 
-    # ===== ⭐ ডিফল্ট রিপ্লাই ফিচার ⭐ =====
+    # ===== ডিফল্ট রিপ্লাই ফিচার =====
     elif data == "toggle_default_reply":
         current = get_setting('default_reply_enabled', '1')
         new = '0' if current == '1' else '1'
@@ -445,7 +444,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ===== Settings Menu (Updated) =====
+# ===== Settings Menu =====
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_status = '✅ ON' if get_setting('welcome_enabled') == '1' else '❌ OFF'
     blockphoto_status = '✅ ON' if get_setting('block_photo_enabled') == '1' else '❌ OFF'
@@ -455,7 +454,6 @@ async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     typing_min = typing_time // 60
     welcome_photo = '✅ Set' if get_setting('welcome_photo', '') else '❌ None'
     
-    # ===== ⭐ ডিফল্ট রিপ্লাই স্ট্যাটাস ⭐ =====
     default_reply_status = '✅ ON' if get_setting('default_reply_enabled') == '1' else '❌ OFF'
 
     keyboard = [
@@ -467,7 +465,6 @@ async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton(f"🛡️ Anti-Spam: {antispam_status}", callback_data="toggle_antispam")],
         [InlineKeyboardButton(f"⌨️ Typing: {typing_status}", callback_data="toggle_typing")],
         [InlineKeyboardButton(f"⏱️ Typing Time: {typing_min} min", callback_data="set_typing_time")],
-        # ===== ⭐ নতুন বাটন: ডিফল্ট রিপ্লাই ⭐ =====
         [InlineKeyboardButton(f"💬 Default Reply: {default_reply_status}", callback_data="toggle_default_reply")],
         [InlineKeyboardButton("✏️ Set Default Reply Text", callback_data="set_default_reply_text")],
         [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]
@@ -551,7 +548,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
 
-    # ===== ⭐ ডিফল্ট রিপ্লাই টেক্সট পরিবর্তন ⭐ =====
     elif awaiting == 'default_reply_text':
         text = update.message.text.strip()
         if not text:
@@ -591,7 +587,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Error: {context.error}")
 
 
-# ===== Main =====
+# ===== Main Function =====
 async def run_bot():
     init_db()
     logger.info("✅ Database ready")
@@ -624,16 +620,21 @@ async def run_bot():
 
 
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
+    """Flask চালানো (Render এর জন্য)"""
+    flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 
 def run_main():
+    """Main function"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(run_bot())
 
 
+# ===== এন্ট্রি পয়েন্ট =====
 if __name__ == "__main__":
+    # Flask thread
     t = Thread(target=run_flask, daemon=True)
     t.start()
+    # Main bot
     run_main()

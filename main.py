@@ -34,16 +34,28 @@ def health():
 # ===== User Account =====
 user_client = None
 user_bot_running = False
-user_message_times = {}
-spam_blocked_users = {}
+user_account_info = None
 
-async def start_user_client():
-    global user_client, user_bot_running
+async def start_user_client(api_id=None, api_hash=None, session_str=None):
+    global user_client, user_bot_running, user_account_info
+    
+    if user_client:
+        try:
+            await user_client.disconnect()
+        except:
+            pass
+        user_client = None
+
     try:
-        user_client = TelegramClient(StringSession(USER_STRING_SESSION), USER_API_ID, USER_API_HASH)
+        aid = api_id or USER_API_ID
+        ahash = api_hash or USER_API_HASH
+        ssession = session_str or USER_STRING_SESSION
+
+        user_client = TelegramClient(StringSession(ssession), aid, ahash)
         await user_client.start()
         me = await user_client.get_me()
-        logger.info(f"✅ User Account: {me.first_name}")
+        user_account_info = me
+        print(f"✅ User Account: {me.first_name} (ID: {me.id})")
         user_bot_running = True
 
         from telethon import events
@@ -59,27 +71,11 @@ async def start_user_client():
             if sender_id == ADMIN_ID:
                 return
 
-            # Anti-spam
-            if get_setting('antispam_enabled', '1') == '1':
-                now = time.time()
-                if sender_id not in user_message_times:
-                    user_message_times[sender_id] = []
-                user_message_times[sender_id] = [t for t in user_message_times[sender_id] if now - t < 60]
-
-                if sender_id in spam_blocked_users:
-                    if now - spam_blocked_users[sender_id] < 1800:
-                        return
-                    else:
-                        del spam_blocked_users[sender_id]
-
-                user_message_times[sender_id].append(now)
-                if len(user_message_times[sender_id]) > 5:
-                    spam_blocked_users[sender_id] = now
-                    try:
-                        await event.respond("⛔ Spam detected! Blocked 30 min.")
-                    except:
-                        pass
-                    return
+            # ✅ SEEN করে দাও - ডাবল টিক আসবে
+            try:
+                await user_client.send_read_acknowledge(event.message)
+            except:
+                pass
 
             # Block photo
             if event.message.media and isinstance(event.message.media, MessageMediaPhoto):
@@ -92,12 +88,12 @@ async def start_user_client():
 
             # Typing time
             typing_enabled = get_setting('typing_enabled', '1') == '1'
-            typing_duration = int(get_setting('typing_duration', '300'))
+            typing_duration = int(get_setting('typing_duration', '5'))
 
             msg_text = event.message.text or ""
             msg_lower = msg_text.lower().strip()
 
-            # ===== CHECK REPLIES (keyword match) =====
+            # CHECK REPLIES
             replies = get_all_replies()
             matched = False
 
@@ -105,27 +101,25 @@ async def start_user_client():
                 kw = keyword.lower().strip()
                 if rtype == "exact" and msg_lower == kw:
                     matched = True
-                    if typing_enabled:
+                    if typing_enabled and typing_duration > 0:
                         async with user_client.action(event.chat_id, "typing"):
                             await asyncio.sleep(typing_duration)
                     await event.respond(reply_text)
                     break
                 elif rtype == "contains" and kw in msg_lower:
                     matched = True
-                    if typing_enabled:
+                    if typing_enabled and typing_duration > 0:
                         async with user_client.action(event.chat_id, "typing"):
                             await asyncio.sleep(typing_duration)
                     await event.respond(reply_text)
                     break
 
-            # ===== NO MATCH =====
+            # NO MATCH
             if not matched:
-                # প্রথমে Welcome Check
                 welcome_enabled = get_setting('welcome_enabled', '1') == '1'
                 
                 if welcome_enabled:
-                    # Welcome message পাঠাবে
-                    if typing_enabled:
+                    if typing_enabled and typing_duration > 0:
                         async with user_client.action(event.chat_id, "typing"):
                             await asyncio.sleep(typing_duration)
                     
@@ -138,12 +132,10 @@ async def start_user_client():
                             await event.respond(welcome_msg)
                     else:
                         await event.respond(welcome_msg)
-                
                 else:
-                    # Welcome বন্ধ থাকলে Default Reply পাঠাবে
                     default_reply_enabled = get_setting('default_reply_enabled', '1') == '1'
                     if default_reply_enabled:
-                        if typing_enabled:
+                        if typing_enabled and typing_duration > 0:
                             async with user_client.action(event.chat_id, "typing"):
                                 await asyncio.sleep(typing_duration)
                         
@@ -153,12 +145,12 @@ async def start_user_client():
 
         await user_client.run_until_disconnected()
     except Exception as e:
-        logger.error(f"User account error: {e}")
+        print(f"User account error: {e}")
         user_bot_running = False
 
 
 # ========================
-#    BOT COMMANDS (Button Only)
+#    BOT BUTTONS
 # ========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -168,17 +160,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update, context)
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_info = ""
+    if user_account_info:
+        user_info = f"👤 Account: {user_account_info.first_name} (ID: {user_account_info.id})"
+    
     keyboard = [
         [InlineKeyboardButton("📋 Replies", callback_data="menu_replies")],
         [InlineKeyboardButton("➕ Add Reply", callback_data="menu_add_reply")],
         [InlineKeyboardButton("🗑 Delete Reply", callback_data="menu_del_reply")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings")],
-        [InlineKeyboardButton("📊 Status", callback_data="menu_status")]
+        [InlineKeyboardButton("📊 Status", callback_data="menu_status")],
+        [InlineKeyboardButton("🔐 Login New Account", callback_data="menu_login")]
     ]
     text = (
         "🤖 **UserBot Control Panel**\n\n"
         f"🟢 UserBot: {'✅ Running' if user_bot_running else '❌ Stopped'}\n"
-        f"📝 Total Replies: {get_reply_count()}\n\n"
+        f"📝 Total Replies: {get_reply_count()}\n"
+        f"{user_info}\n\n"
         "নিচের বাটন ক্লিক করুন 👇"
     )
     if update.callback_query:
@@ -194,16 +192,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
 
-    # ===== MAIN MENU =====
+    # MAIN MENU
     if data == "main_menu":
         await show_main_menu(update, context)
 
-    # ===== REPLIES LIST =====
+    # ===== ✅ LOGIN NEW ACCOUNT =====
+    elif data == "menu_login":
+        await query.edit_message_text(
+            "🔐 **Login New Account - Step 1/3**\n\n"
+            "আপনার **API ID** লিখুন (শুধু সংখ্যা):\n\n"
+            "বাতিল করতে `/cancel` টাইপ করুন",
+            parse_mode='Markdown'
+        )
+        context.user_data['awaiting'] = 'login_api_id'
+
+    # REPLIES LIST
     elif data == "menu_replies":
         replies = get_all_replies()
         if not replies:
             await query.edit_message_text(
-                "📭 **No replies yet!**\n\n+ Add Reply বাটনে ক্লিক করুন।",
+                "📭 **No replies yet!**\n\n➕ Add Reply বাটনে ক্লিক করুন।",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]),
                 parse_mode='Markdown'
             )
@@ -238,7 +246,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['reply_page'] = int(data.split("_")[2])
         await button_callback(update, context)
 
-    # ===== ADD REPLY =====
+    # ADD REPLY
     elif data == "menu_add_reply":
         await query.edit_message_text(
             "➕ **Add Reply - Step 1/3**\n\n"
@@ -274,7 +282,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data['awaiting'] = 'reply_text'
 
-    # ===== DELETE REPLY =====
+    # DELETE REPLY
     elif data == "menu_del_reply":
         replies = get_all_replies()
         if not replies:
@@ -323,7 +331,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]])
             )
 
-    # ===== SETTINGS =====
+    # SETTINGS
     elif data == "menu_settings":
         await show_settings_menu(update, context)
 
@@ -358,30 +366,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting('block_photo_enabled', new)
         await show_settings_menu(update, context)
 
-    elif data == "toggle_antispam":
-        current = get_setting('antispam_enabled', '1')
-        new = '0' if current == '1' else '1'
-        set_setting('antispam_enabled', new)
-        await show_settings_menu(update, context)
-
     elif data == "toggle_typing":
         current = get_setting('typing_enabled', '1')
         new = '0' if current == '1' else '1'
         set_setting('typing_enabled', new)
         await show_settings_menu(update, context)
 
+    # ✅ TYPING TIME (seconds)
     elif data == "set_typing_time":
-        current = int(get_setting('typing_duration', '300'))
-        minutes = current // 60
+        current = int(get_setting('typing_duration', '5'))
         await query.edit_message_text(
-            f"⏱️ **Set Typing Duration**\n\nবর্তমান: {minutes} মিনিট ({current} সেকেন্ড)\n\n"
+            f"⏱️ **Set Typing Duration**\n\n"
+            f"বর্তমান: {current} সেকেন্ড\n\n"
             f"নতুন সময় সিলেক্ট করুন:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("60s (1m)", callback_data="typetime_60"),
-                 InlineKeyboardButton("120s (2m)", callback_data="typetime_120")],
-                [InlineKeyboardButton("180s (3m)", callback_data="typetime_180"),
-                 InlineKeyboardButton("300s (5m)", callback_data="typetime_300")],
-                [InlineKeyboardButton("600s (10m)", callback_data="typetime_600")],
+                [InlineKeyboardButton("5s", callback_data="typetime_5"),
+                 InlineKeyboardButton("10s", callback_data="typetime_10")],
+                [InlineKeyboardButton("15s", callback_data="typetime_15"),
+                 InlineKeyboardButton("20s", callback_data="typetime_20")],
+                [InlineKeyboardButton("30s", callback_data="typetime_30"),
+                 InlineKeyboardButton("60s (1m)", callback_data="typetime_60")],
+                [InlineKeyboardButton("120s (2m)", callback_data="typetime_120"),
+                 InlineKeyboardButton("180s (3m)", callback_data="typetime_180")],
+                [InlineKeyboardButton("300s (5m)", callback_data="typetime_300")],
+                [InlineKeyboardButton("🎯 Custom Value", callback_data="typetime_custom")],
                 [InlineKeyboardButton("🔙 Back", callback_data="menu_settings")]
             ]),
             parse_mode='Markdown'
@@ -392,7 +400,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting('typing_duration', str(sec))
         await show_settings_menu(update, context)
 
-    # ===== ডিফল্ট রিপ্লাই ফিচার =====
+    # ✅ CUSTOM TYPING TIME
+    elif data == "typetime_custom":
+        await query.edit_message_text(
+            "⏱️ **Custom Typing Duration**\n\n"
+            "সেকেন্ডে একটি সংখ্যা লিখুন (যেমন: 7, 12, 25):\n\n"
+            "বাতিল করতে `/cancel` টাইপ করুন",
+            parse_mode='Markdown'
+        )
+        context.user_data['awaiting'] = 'custom_typing_time'
+
+    # DEFAULT REPLY
     elif data == "toggle_default_reply":
         current = get_setting('default_reply_enabled', '1')
         new = '0' if current == '1' else '1'
@@ -406,39 +424,39 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✏️ **Set Default Reply**\n\n"
             f"বর্তমান ডিফল্ট রিপ্লাই:\n`{current_default}`\n\n"
             f"**নতুন ডিফল্ট রিপ্লাই টেক্সট লিখুন:**\n\n"
-            f"(এটা তখনই যাবে যখন কোন keyword match পাবে না)\n\n"
-            f"⚠️ *Welcome ON থাকলে Welcome যাবে, Welcome OFF থাকলেই Default Reply যাবে*",
+            f"(এটা তখনই যাবে যখন কোন keyword match পাবে না আর Welcome OFF থাকলে)",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data="menu_settings")]]),
             parse_mode='Markdown'
         )
         context.user_data['awaiting'] = 'default_reply_text'
 
-    # ===== STATUS =====
+    # STATUS
     elif data == "menu_status":
         welcome = '✅ ON' if get_setting('welcome_enabled') == '1' else '❌ OFF'
         blockphoto = '✅ ON' if get_setting('block_photo_enabled') == '1' else '❌ OFF'
-        antispam = '✅ ON' if get_setting('antispam_enabled') == '1' else '❌ OFF'
         typing = '✅ ON' if get_setting('typing_enabled') == '1' else '❌ OFF'
-        typing_time = int(get_setting('typing_duration', '300'))
-        typing_min = typing_time // 60
+        typing_time = int(get_setting('typing_duration', '5'))
         default_reply = '✅ ON' if get_setting('default_reply_enabled') == '1' else '❌ OFF'
-        
         default_reply_text = get_setting('default_reply_text', 
             '🤖 আমি এখনো আপনার প্রশ্ন বুঝতে পারিনি।')
+
+        account_line = ""
+        if user_account_info:
+            account_line = f"👤 Account: {user_account_info.first_name} (@{user_account_info.username or 'N/A'})\n"
 
         await query.edit_message_text(
             f"📊 **Bot Status**\n\n"
             f"🤖 UserBot: {'✅ Running' if user_bot_running else '❌ Stopped'}\n"
+            f"{account_line}"
             f"📝 Total Replies: {get_reply_count()}\n\n"
             f"**Settings:**\n"
             f"👋 Welcome: {welcome}\n"
             f"📸 Block Photo: {blockphoto}\n"
-            f"🛡️ Anti-Spam: {antispam}\n"
             f"⌨️ Typing: {typing}\n"
-            f"⏱️ Duration: {typing_min} min\n"
+            f"⏱️ Duration: {typing_time} sec\n"
             f"💬 Default Reply: {default_reply}\n"
             f"📄 Default Text: {default_reply_text[:40]}...\n\n"
-            f"🚫 Blocked Users: {len(spam_blocked_users)}",
+            f"✅ **Seen (✔✔ ডাবল টিক): সবসময় Active**",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]]),
             parse_mode='Markdown'
         )
@@ -448,12 +466,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_status = '✅ ON' if get_setting('welcome_enabled') == '1' else '❌ OFF'
     blockphoto_status = '✅ ON' if get_setting('block_photo_enabled') == '1' else '❌ OFF'
-    antispam_status = '✅ ON' if get_setting('antispam_enabled') == '1' else '❌ OFF'
     typing_status = '✅ ON' if get_setting('typing_enabled') == '1' else '❌ OFF'
-    typing_time = int(get_setting('typing_duration', '300'))
-    typing_min = typing_time // 60
+    typing_time = int(get_setting('typing_duration', '5'))
     welcome_photo = '✅ Set' if get_setting('welcome_photo', '') else '❌ None'
-    
     default_reply_status = '✅ ON' if get_setting('default_reply_enabled') == '1' else '❌ OFF'
 
     keyboard = [
@@ -462,26 +477,19 @@ async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton(f"🖼 Welcome Photo: {welcome_photo}", callback_data="set_welcome_photo")],
         [InlineKeyboardButton("❌ Remove Welcome Photo", callback_data="remove_welcome_photo")],
         [InlineKeyboardButton(f"📸 Block Photo: {blockphoto_status}", callback_data="toggle_blockphoto")],
-        [InlineKeyboardButton(f"🛡️ Anti-Spam: {antispam_status}", callback_data="toggle_antispam")],
         [InlineKeyboardButton(f"⌨️ Typing: {typing_status}", callback_data="toggle_typing")],
-        [InlineKeyboardButton(f"⏱️ Typing Time: {typing_min} min", callback_data="set_typing_time")],
+        [InlineKeyboardButton(f"⏱️ Typing Time: {typing_time}s", callback_data="set_typing_time")],
         [InlineKeyboardButton(f"💬 Default Reply: {default_reply_status}", callback_data="toggle_default_reply")],
         [InlineKeyboardButton("✏️ Set Default Reply Text", callback_data="set_default_reply_text")],
         [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]
     ]
 
+    msg = "⚙️ **Settings**\n\nকনফিগার করতে ক্লিক করুন 👇\n\n✅ **Anti-Spam: সরিয়ে দেওয়া হয়েছে**\n✅ **Seen (ডাবল টিক): সবসময় Active**"
+
     if update.callback_query:
-        await update.callback_query.edit_message_text(
-            "⚙️ **Settings**\n\nকনফিগার করতে ক্লিক করুন 👇",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
+        await update.callback_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
-        await update.message.reply_text(
-            "⚙️ **Settings**",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 
 # ===== Text Message Handler =====
@@ -490,9 +498,82 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     awaiting = context.user_data.get('awaiting', '')
+    text = update.message.text.strip()
 
+    # ===== LOGIN FLOW =====
+    if awaiting == 'login_api_id':
+        try:
+            api_id = int(text)
+            context.user_data['login_api_id'] = api_id
+            context.user_data['awaiting'] = 'login_api_hash'
+            await update.message.reply_text(
+                "🔐 **Login - Step 2/3**\n\n"
+                f"API ID: `{api_id}` ✅\n\n"
+                "এখন আপনার **API Hash** লিখুন:",
+                parse_mode='Markdown'
+            )
+        except ValueError:
+            await update.message.reply_text("❌ Invalid API ID! শুধু সংখ্যা দিন।")
+        return
+
+    elif awaiting == 'login_api_hash':
+        api_hash = text
+        if len(api_hash) < 10:
+            await update.message.reply_text("❌ API Hash খুব ছোট! সঠিক Hash দিন।")
+            return
+        context.user_data['login_api_hash'] = api_hash
+        context.user_data['awaiting'] = 'login_session'
+        await update.message.reply_text(
+            "🔐 **Login - Step 3/3**\n\n"
+            f"API ID: `{context.user_data['login_api_id']}` ✅\n"
+            f"API Hash: `{api_hash[:8]}...` ✅\n\n"
+            "এখন আপনার **String Session** লিখুন:",
+            parse_mode='Markdown'
+        )
+        return
+
+    elif awaiting == 'login_session':
+        api_id = context.user_data['login_api_id']
+        api_hash = context.user_data['login_api_hash']
+        session_str = text
+
+        if len(session_str) < 20:
+            await update.message.reply_text("❌ Session string খুব ছোট! সঠিক session দিন।")
+            return
+
+        await update.message.reply_text("🔄 **Logging in with new account...** দয়া করে অপেক্ষা করুন...", parse_mode='Markdown')
+
+        context.user_data['awaiting'] = ''
+        asyncio.create_task(start_user_client(api_id, api_hash, session_str))
+
+        await update.message.reply_text(
+            "✅ **New account login started!**\n\nকিছুক্ষণের মধ্যে চালু হবে। `/start` দিয়ে চেক করুন।",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]]),
+            parse_mode='Markdown'
+        )
+        return
+
+    # ===== CUSTOM TYPING TIME =====
+    elif awaiting == 'custom_typing_time':
+        try:
+            sec = int(text)
+            if sec < 1 or sec > 600:
+                await update.message.reply_text("❌ 1 থেকে 600 সেকেন্ডের মধ্যে মান দিন।")
+                return
+            set_setting('typing_duration', str(sec))
+            context.user_data['awaiting'] = ''
+            await update.message.reply_text(
+                f"✅ **Typing time set to {sec} seconds!**",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Settings", callback_data="menu_settings")]]),
+                parse_mode='Markdown'
+            )
+        except ValueError:
+            await update.message.reply_text("❌ শুধু সংখ্যা দিন (যেমন: 7, 12, 30)")
+        return
+
+    # NORMAL FLOW
     if awaiting == 'keyword':
-        keyword = update.message.text.strip()
+        keyword = text
         if not keyword:
             await update.message.reply_text("❌ Keyword empty!")
             return
@@ -512,7 +593,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif awaiting == 'reply_text':
-        reply_text = update.message.text.strip()
+        reply_text = text
         if not reply_text:
             await update.message.reply_text("❌ Reply text empty!")
             return
@@ -536,7 +617,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif awaiting == 'welcome_text':
-        text = update.message.text.strip()
+        text = text
         if not text:
             await update.message.reply_text("❌ Text empty!")
             return
@@ -549,7 +630,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif awaiting == 'default_reply_text':
-        text = update.message.text.strip()
+        text = text
         if not text:
             await update.message.reply_text("❌ Text empty!")
             return
@@ -584,35 +665,40 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== Error Handler =====
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Error: {context.error}")
+    print(f"Error: {context.error}")
+
+
+# ===== Cancel Command =====
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    context.user_data['awaiting'] = ''
+    await update.message.reply_text(
+        "✅ **Cancelled!**",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]])
+    )
 
 
 # ===== Main Function =====
 async def run_bot():
     init_db()
-    logger.info("✅ Database ready")
+    print("✅ Database ready")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Commands
+    # শুধুমাত্র /start আর /cancel — বাকিটা বাটন
     app.add_handler(CommandHandler("start", start, filters=filters.User(ADMIN_ID)))
+    app.add_handler(CommandHandler("cancel", cancel_command, filters=filters.User(ADMIN_ID)))
 
-    # Callbacks (button clicks)
     app.add_handler(CallbackQueryHandler(button_callback))
-
-    # Text messages
     app.add_handler(MessageHandler(filters.TEXT & filters.User(ADMIN_ID), text_handler))
-
-    # Photos
     app.add_handler(MessageHandler(filters.PHOTO & filters.User(ADMIN_ID), photo_handler))
-
     app.add_error_handler(error_handler)
 
     await app.initialize()
     await app.start()
-    logger.info("✅ Bot started!")
+    print("✅ Bot started!")
 
-    # Start user account
     asyncio.create_task(start_user_client())
 
     await app.updater.start_polling()
@@ -620,21 +706,16 @@ async def run_bot():
 
 
 def run_flask():
-    """Flask চালানো (Render এর জন্য)"""
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 
 def run_main():
-    """Main function"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(run_bot())
 
 
-# ===== এন্ট্রি পয়েন্ট =====
 if __name__ == "__main__":
-    # Flask thread
     t = Thread(target=run_flask, daemon=True)
     t.start()
-    # Main bot
     run_main()

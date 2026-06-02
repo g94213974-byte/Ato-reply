@@ -11,7 +11,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import BlockRequest
-from telethon.tl.functions.messages import DeleteMessagesRequest, ReadHistoryRequest, DeleteHistoryRequest
+from telethon.tl.functions.messages import DeleteMessagesRequest, ReadHistoryRequest
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from telethon.errors import FloodWaitError
 
@@ -34,12 +34,10 @@ def health():
 
 accounts = []
 _welcomed_chats = set()
-_account_index = 0
-
 
 async def start_all_accounts():
     if not ACCOUNTS:
-        logger.warning("⚠️ No accounts configured in Environment Variables!")
+        logger.warning("⚠️ No accounts configured!")
         return
     
     logger.info(f"🔄 Starting {len(ACCOUNTS)} accounts...")
@@ -74,125 +72,113 @@ def _register_handler(client, acc_info):
     
     @client.on(events.NewMessage(incoming=True))
     async def auto_reply_handler(event):
-        if not event.is_private:
-            return
-        
-        sender = await event.get_sender()
-        sender_id = sender.id
-        
-        if sender_id == ADMIN_ID:
-            return
-        if not acc_info.get('enabled', True):
-            return
-        
-        chat_id = event.chat_id
-        msg_id = event.message.id
-        
-        # ===== FIXED: PHOTO BLOCK + DELETE ALL + BLOCK USER (উভয় পক্ষ থেকে) =====
-        is_photo = False
-        if event.message.media:
-            if isinstance(event.message.media, MessageMediaPhoto):
-                is_photo = True
-            elif isinstance(event.message.media, MessageMediaDocument):
-                if hasattr(event.message.media, 'document') and event.message.media.document:
-                    mime = (event.message.media.document.mime_type or '').lower()
-                    if mime.startswith('image/') and 'webp' not in mime and 'sticker' not in mime:
-                        is_photo = True
-        
-        if is_photo:
-            block_photo = get_setting('block_photo_enabled', '1') == '1'
-            if block_photo:
-                try:
-                    peer = await event.get_input_chat()
-                    
-                    logger.info(f"📸 Photo received from {sender_id}, starting block+delete process...")
-                    
-                    # ----- ধাপ ১: ইউজারকে ব্লক করুন -----
+        try:
+            # শুধুমাত্র PRIVATE chat এ কাজ করবে
+            if not event.is_private:
+                return
+            
+            sender = await event.get_sender()
+            if sender is None:
+                return
+            sender_id = sender.id
+            
+            if sender_id == ADMIN_ID:
+                return
+            if not acc_info.get('enabled', True):
+                return
+            
+            chat_id = event.chat_id
+            msg_id = event.message.id
+            
+            # PHOTO CHECK
+            is_photo = False
+            if event.message.media:
+                if isinstance(event.message.media, MessageMediaPhoto):
+                    is_photo = True
+                elif isinstance(event.message.media, MessageMediaDocument):
+                    if hasattr(event.message.media, 'document') and event.message.media.document:
+                        mime = (event.message.media.document.mime_type or '').lower()
+                        if mime.startswith('image/') and 'webp' not in mime and 'sticker' not in mime:
+                            is_photo = True
+            
+            if is_photo:
+                block_photo = get_setting('block_photo_enabled', '1') == '1'
+                if block_photo:
                     try:
-                        await client(BlockRequest(id=sender_id))
-                        logger.info(f"✅ [{sender_id}] Blocked successfully")
-                    except Exception as e:
-                        logger.warning(f"⚠️ [{sender_id}] Block error (maybe already blocked): {e}")
-                    
-                    await asyncio.sleep(0.5)
-                    
-                    # ----- ধাপ ২: পুরো চ্যাট হিস্টোরি ডিলিট (উভয় পক্ষ থেকে) -----
-                    # DeleteHistoryRequest দিয়ে পুরো চ্যাট একবারেই ডিলিট
-                    try:
-                        await client(DeleteHistoryRequest(
-                            peer=peer,
-                            max_id=0,
-                            revoke=True,      # TRUE = উভয় পক্ষ থেকে ডিলিট হবে
-                            just_clear=False
-                        ))
-                        logger.info(f"✅ [{sender_id}] Full chat history deleted from BOTH sides!")
-                    except Exception as e:
-                        logger.warning(f"⚠️ [{sender_id}] DeleteHistory failed: {e}")
+                        peer = await event.get_input_chat()
                         
-                        # Backup: মেসেজ বাই মেসেজ ডিলিট (revoke=True দিয়ে)
+                        # Step 1: Block
                         try:
-                            async for msg in client.iter_messages(chat_id):
+                            await client(BlockRequest(id=sender_id))
+                        except:
+                            pass
+                        
+                        await asyncio.sleep(0.3)
+                        
+                        # Step 2: Delete this message
+                        try:
+                            await client.delete_messages(peer, [msg_id], revoke=True)
+                        except:
+                            pass
+                        
+                        # Step 3: Delete all messages
+                        try:
+                            async for msg in client.iter_messages(chat_id, limit=200):
                                 try:
                                     await client.delete_messages(peer, [msg.id], revoke=True)
-                                    await asyncio.sleep(0.15)
+                                    await asyncio.sleep(0.1)
                                 except:
                                     pass
-                            logger.info(f"✅ [{sender_id}] Messages deleted one by one")
-                        except Exception as e2:
-                            logger.error(f"❌ [{sender_id}] Backup delete also failed: {e2}")
-                    
-                    # ----- ধাপ ৩: বর্তমান মেসেজটিও ডিলিট নিশ্চিত করুন -----
-                    try:
-                        await client.delete_messages(peer, [msg_id], revoke=True)
+                        except:
+                            pass
                     except:
                         pass
-                    
-                    logger.info(f"✅ [{sender_id}] Photo block process COMPLETE!")
-                    
-                except Exception as e:
-                    logger.error(f"❌ Photo block overall error: {e}")
                 return
-        
-        # --- SEEN ---
-        try:
-            await client(ReadHistoryRequest(peer=await event.get_input_chat(), max_id=msg_id))
-        except:
-            pass
-        
-        typing_enabled = get_setting('typing_enabled', '1') == '1'
-        typing_duration = int(get_setting('typing_duration', '5'))
-        
-        msg_text = event.message.text or ""
-        if not msg_text:
-            return
-        
-        msg_lower = msg_text.lower().strip()
-        replies = get_all_replies()
-        matched = False
-        welcome_photo = get_setting('welcome_photo', '')
-        default_photo = get_setting('default_photo', '')
-        
-        for rid, keyword, reply_text, rtype in replies:
-            kw = keyword.lower().strip()
-            if rtype == "exact" and msg_lower == kw:
-                matched = True
-                if typing_enabled:
-                    async with client.action(event.chat_id, "typing"):
-                        await asyncio.sleep(typing_duration)
-                await event.respond(reply_text)
-                break
-            elif rtype == "contains" and kw in msg_lower:
-                matched = True
-                if typing_enabled:
-                    async with client.action(event.chat_id, "typing"):
-                        await asyncio.sleep(typing_duration)
-                await event.respond(reply_text)
-                break
-        
-        if not matched:
-            if chat_id not in _welcomed_chats:
+            
+            # SEEN
+            try:
+                await client(ReadHistoryRequest(peer=await event.get_input_chat(), max_id=msg_id))
+            except:
+                pass
+            
+            # TEXT REPLY
+            msg_text = event.message.text or ""
+            if not msg_text:
+                return
+            
+            typing_enabled = get_setting('typing_enabled', '1') == '1'
+            typing_duration = int(get_setting('typing_duration', '5'))
+            msg_lower = msg_text.lower().strip()
+            replies = get_all_replies()
+            matched = False
+            
+            for rid, keyword, reply_text, rtype in replies:
+                kw = keyword.lower().strip()
+                if rtype == "exact" and msg_lower == kw:
+                    matched = True
+                    if typing_enabled:
+                        async with client.action(event.chat_id, "typing"):
+                            await asyncio.sleep(typing_duration)
+                    await event.respond(reply_text)
+                    break
+                elif rtype == "contains" and kw in msg_lower:
+                    matched = True
+                    if typing_enabled:
+                        async with client.action(event.chat_id, "typing"):
+                            await asyncio.sleep(typing_duration)
+                    await event.respond(reply_text)
+                    break
+            
+            if not matched:
+                default_reply_enabled = get_setting('default_reply_enabled', '1') == '1'
+                if not default_reply_enabled:
+                    return
+                
                 welcome_enabled = get_setting('welcome_enabled', '1') == '1'
-                if welcome_enabled:
+                welcome_photo = get_setting('welcome_photo', '')
+                default_photo = get_setting('default_photo', '')
+                
+                if chat_id not in _welcomed_chats and welcome_enabled:
                     _welcomed_chats.add(chat_id)
                     if typing_enabled:
                         async with client.action(event.chat_id, "typing"):
@@ -207,26 +193,19 @@ def _register_handler(client, acc_info):
                         await event.respond(welcome_msg)
                 else:
                     _welcomed_chats.add(chat_id)
-                    await _send_default_reply(event, client, typing_enabled, typing_duration, default_photo)
-            else:
-                await _send_default_reply(event, client, typing_enabled, typing_duration, default_photo)
-
-
-async def _send_default_reply(event, client, typing_enabled, typing_duration, default_photo):
-    default_reply_enabled = get_setting('default_reply_enabled', '1') == '1'
-    if not default_reply_enabled:
-        return
-    if typing_enabled:
-        async with client.action(event.chat_id, "typing"):
-            await asyncio.sleep(typing_duration)
-    default_reply = get_setting('default_reply_text', '🤖 আমি এখনো আপনার প্রশ্ন বুঝতে পারিনি।')
-    if default_photo and os.path.exists(default_photo):
-        try:
-            await client.send_file(event.chat_id, default_photo, caption=default_reply)
-        except:
-            await event.respond(default_reply)
-    else:
-        await event.respond(default_reply)
+                    if typing_enabled:
+                        async with client.action(event.chat_id, "typing"):
+                            await asyncio.sleep(typing_duration)
+                    default_reply = get_setting('default_reply_text', '🤖 আমি এখনো আপনার প্রশ্ন বুঝতে পারিনি।')
+                    if default_photo and os.path.exists(default_photo):
+                        try:
+                            await client.send_file(event.chat_id, default_photo, caption=default_reply)
+                        except:
+                            await event.respond(default_reply)
+                    else:
+                        await event.respond(default_reply)
+        except Exception as e:
+            logger.error(f"Handler error: {e}")
 
 
 # ===== BOT COMMANDS =====

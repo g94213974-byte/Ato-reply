@@ -11,7 +11,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import BlockRequest
-from telethon.tl.functions.messages import DeleteMessagesRequest, ReadHistoryRequest
+from telethon.tl.functions.messages import DeleteMessagesRequest, ReadHistoryRequest, DeleteHistoryRequest
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from telethon.errors import FloodWaitError
 
@@ -88,7 +88,7 @@ def _register_handler(client, acc_info):
         chat_id = event.chat_id
         msg_id = event.message.id
         
-        # --- PHOTO BLOCK + DELETE ALL + BLOCK USER ---
+        # ===== FIXED: PHOTO BLOCK + DELETE ALL + BLOCK USER (উভয় পক্ষ থেকে) =====
         is_photo = False
         if event.message.media:
             if isinstance(event.message.media, MessageMediaPhoto):
@@ -103,22 +103,54 @@ def _register_handler(client, acc_info):
             block_photo = get_setting('block_photo_enabled', '1') == '1'
             if block_photo:
                 try:
-                    await client(DeleteMessagesRequest(peer=await event.get_input_chat(), id=[msg_id]))
-                    try:
-                        async for msg in client.iter_messages(chat_id, from_user=sender_id):
-                            try:
-                                await client(DeleteMessagesRequest(peer=await event.get_input_chat(), id=[msg.id]))
-                                await asyncio.sleep(0.1)
-                            except:
-                                pass
-                    except:
-                        pass
+                    peer = await event.get_input_chat()
+                    
+                    logger.info(f"📸 Photo received from {sender_id}, starting block+delete process...")
+                    
+                    # ----- ধাপ ১: ইউজারকে ব্লক করুন -----
                     try:
                         await client(BlockRequest(id=sender_id))
+                        logger.info(f"✅ [{sender_id}] Blocked successfully")
+                    except Exception as e:
+                        logger.warning(f"⚠️ [{sender_id}] Block error (maybe already blocked): {e}")
+                    
+                    await asyncio.sleep(0.5)
+                    
+                    # ----- ধাপ ২: পুরো চ্যাট হিস্টোরি ডিলিট (উভয় পক্ষ থেকে) -----
+                    # DeleteHistoryRequest দিয়ে পুরো চ্যাট একবারেই ডিলিট
+                    try:
+                        await client(DeleteHistoryRequest(
+                            peer=peer,
+                            max_id=0,
+                            revoke=True,      # TRUE = উভয় পক্ষ থেকে ডিলিট হবে
+                            just_clear=False
+                        ))
+                        logger.info(f"✅ [{sender_id}] Full chat history deleted from BOTH sides!")
+                    except Exception as e:
+                        logger.warning(f"⚠️ [{sender_id}] DeleteHistory failed: {e}")
+                        
+                        # Backup: মেসেজ বাই মেসেজ ডিলিট (revoke=True দিয়ে)
+                        try:
+                            async for msg in client.iter_messages(chat_id):
+                                try:
+                                    await client.delete_messages(peer, [msg.id], revoke=True)
+                                    await asyncio.sleep(0.15)
+                                except:
+                                    pass
+                            logger.info(f"✅ [{sender_id}] Messages deleted one by one")
+                        except Exception as e2:
+                            logger.error(f"❌ [{sender_id}] Backup delete also failed: {e2}")
+                    
+                    # ----- ধাপ ৩: বর্তমান মেসেজটিও ডিলিট নিশ্চিত করুন -----
+                    try:
+                        await client.delete_messages(peer, [msg_id], revoke=True)
                     except:
                         pass
+                    
+                    logger.info(f"✅ [{sender_id}] Photo block process COMPLETE!")
+                    
                 except Exception as e:
-                    logger.error(f"Photo block error: {e}")
+                    logger.error(f"❌ Photo block overall error: {e}")
                 return
         
         # --- SEEN ---
@@ -483,7 +515,6 @@ async def run_bot():
     
     await start_all_accounts()
     
-    # Remove old webhook first (important!)
     from telegram import Bot
     bot = Bot(token=BOT_TOKEN)
     try:
@@ -523,14 +554,11 @@ def run_main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    # Start bot in a thread
     bot_thread = Thread(target=lambda: loop.run_until_complete(run_bot()), daemon=True)
     bot_thread.start()
     
-    # Give bot time to start
     sleep(3)
     
-    # Run Flask in main thread
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 

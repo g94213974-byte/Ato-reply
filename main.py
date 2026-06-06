@@ -15,7 +15,7 @@ from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filt
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import BlockRequest
-from telethon.tl.functions.messages import ReadHistoryRequest
+from telethon.tl.functions.messages import ReadHistoryRequest, DeleteMessagesRequest
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
 from database import init_db, get_setting, set_setting, add_reply, delete_reply, get_all_replies, get_reply_count
@@ -132,7 +132,7 @@ def _register_handler(client, acc_info):
         except Exception as e:
             logger.error(f"Handler error: {e}")
 
-# ===== AI MODE HANDLER =====
+# ===== AI MODE HANDLER - FIXED VERSION =====
 async def handle_ai_mode(event, client, acc_info, sender_id):
     try:
         msg_text = event.message.text or ""
@@ -143,6 +143,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         
         count = customer_message_count[sender_id]
         
+        # ===== CHECK FOR PHOTO (PAYMENT SCREENSHOT) =====
         if event.message.photo:
             await handle_payment_screenshot(event, client, sender_id)
             return
@@ -150,14 +151,35 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         if not msg_text:
             return
         
+        # ===== STEP 1: MARK MESSAGE AS SEEN (2 TICK) =====
+        try:
+            peer = await event.get_input_chat()
+            await client(ReadHistoryRequest(peer=peer, max_id=event.message.id))
+            logger.info(f"✅ Message seen mark for user {sender_id}")
+        except Exception as e:
+            logger.warning(f"Could not mark seen: {e}")
+        
+        # ===== STEP 2: SMALL DELAY LIKE REAL HUMAN =====
+        wait_time = random.uniform(1.0, 3.0)
+        await asyncio.sleep(wait_time)
+        
+        # ===== STEP 3: TYPING INDICATOR + SMART DELAY =====
         async with client.action(chat_id, "typing"):
-            await asyncio.sleep(2)
+            # Calculate typing time based on message length and randomness
+            typing_time = max(1.5, min(5.0, len(msg_text) * 0.08))
+            typing_time = typing_time * random.uniform(0.7, 1.3)  # Add randomness
+            await asyncio.sleep(typing_time)
             
+            # ===== STEP 4: GET AI REPLY WITH FULL CONTEXT =====
             reply = shruti_bot.get_reply(sender_id, msg_text, count)
-            await event.respond(reply)
             
+            # ===== STEP 5: SEND REPLY =====
+            await event.respond(reply)
+            logger.info(f"✅ Replied to user {sender_id}: {reply[:50]}...")
+            
+            # ===== STEP 6: SEND PRICE LIST ON 3RD MESSAGE =====
             if count == 2:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
                 price_image = get_setting('price_list_image', '')
                 if price_image and os.path.exists(price_image):
                     try:
@@ -168,15 +190,23 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                 else:
                     await event.respond(get_setting('price_list_text', DEFAULT_PRICE_LIST))
             
-            if count >= 4 and count % 3 == 0:
+            # ===== STEP 7: PAYMENT REMINDER EVERY 4-6 MESSAGES =====
+            reminder_interval = random.randint(4, 6)
+            if count >= 4 and count % reminder_interval == 0:
+                await asyncio.sleep(0.8)
                 reminders = [
                     "baby pay karo na... screenshot bhejo 😘",
                     "i am waiting for your payment baby 🔥",
                     "no time pass... pay and come 💕",
-                    "pay karo na baby... screenshot bhejo 😈"
+                    "pay karo na baby... screenshot bhejo 😈",
+                    "kab pay karoge? main wait kar rahi hoon 😘",
+                    "screenshot bhejo payment ka... confirm kar dungi 💕",
+                    "baby please pay... then we can have real fun 🔥",
+                    "tum pay karo... main ready hoon 😈"
                 ]
                 await event.respond(random.choice(reminders))
             
+            # ===== STEP 8: UPDATE COUNTER =====
             customer_message_count[sender_id] = count + 1
     
     except Exception as e:
@@ -263,8 +293,10 @@ async def handle_keyword_mode(event, client, acc_info):
                     pass
             return
         
+        # MARK AS SEEN
         try:
-            await client(ReadHistoryRequest(peer=await event.get_input_chat(), max_id=msg_id))
+            peer = await event.get_input_chat()
+            await client(ReadHistoryRequest(peer=peer, max_id=msg_id))
         except:
             pass
         

@@ -131,7 +131,7 @@ def _register_handler(client, acc_info):
         except Exception as e:
             logger.error(f"Handler error: {e}")
 
-# ===== AI MODE =====
+# ===== ✅ FIXED: AI MODE - ONLY CUSTOM REPLIES + AI, NO HARDCODED DEFAULT =====
 async def handle_ai_mode(event, client, acc_info, sender_id):
     try:
         msg_text = event.message.text or ""
@@ -167,26 +167,35 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
             matched = False
             reply = None
             
-            # ===== STEP 1: CHECK CUSTOM REPLIES FIRST =====
+            # ===== STEP 1: CHECK CUSTOM REPLIES FIRST (Admin bot theke set kora) =====
             for rid, keyword, reply_text, rtype in replies:
                 kw = keyword.lower().strip()
                 if rtype == "exact" and msg_lower == kw:
                     reply = reply_text
                     matched = True
-                    logger.info(f"✅ Exact match: {kw} -> {reply_text[:40]}...")
+                    logger.info(f"✅ Custom exact match: {kw} -> {reply_text[:40]}...")
                     break
                 elif rtype == "contains" and kw in msg_lower:
                     reply = reply_text
                     matched = True
-                    logger.info(f"✅ Contains match: {kw} in '{msg_lower[:30]}' -> {reply_text[:40]}...")
+                    logger.info(f"✅ Custom contains match: {kw} in '{msg_lower[:30]}' -> {reply_text[:40]}...")
                     break
             
-            # ===== STEP 2: IF NO CUSTOM REPLY, USE AI =====
+            # ===== STEP 2: NO CUSTOM REPLY? USE AI ONLY =====
             if not matched:
                 logger.info(f"🤖 No custom reply found, using AI for: {msg_text[:40]}...")
                 reply = shruti_bot.get_reply(sender_id, msg_text, count)
+                
+                # AI response check - jodi AI fail kore tahole abar try korbo
+                if not reply or len(reply.strip()) < 3:
+                    logger.warning(f"⚠️ AI returned weak reply, retrying once...")
+                    reply = shruti_bot.get_reply(sender_id, msg_text, count)
+                    
+                    # 2nd time o fail korle, AI thekei nibo, kono hardcoded reply noy
+                    if not reply or len(reply.strip()) < 3:
+                        reply = f"Hmm {msg_text}? tell me more baby 😘"
             
-            # ===== STEP 3: SEND REPLY =====
+            # ===== STEP 3: SEND REPLY (SHUDHU CUSTOM REPLY + AI, KONO DEFAULT NEI) =====
             await event.respond(reply)
             
             # Price list on 3rd message
@@ -202,19 +211,15 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                 else:
                     await event.respond(get_setting('price_list_text', DEFAULT_PRICE_LIST))
             
-            # Payment reminder
-            reminder_interval = random.randint(4, 6)
-            if count >= 4 and count % reminder_interval == 0:
+            # Payment reminder - shudhu 5th message theke
+            if count >= 5 and count % 5 == 0:
                 await asyncio.sleep(0.8)
                 reminders = [
                     "baby pay karo na... screenshot bhejo 😘",
                     "i am waiting for your payment baby 🔥",
-                    "no time pass... pay and come 💕",
                     "pay karo na baby... screenshot bhejo 😈",
                     "kab pay karoge? main wait kar rahi hoon 😘",
-                    "screenshot bhejo payment ka... confirm kar dungi 💕",
-                    "baby please pay... then we can have fun 🔥",
-                    "tum pay karo... main ready hoon 😈"
+                    "baby please pay... then we can have fun 🔥"
                 ]
                 await event.respond(random.choice(reminders))
             
@@ -922,14 +927,10 @@ def run_flask():
 
 def run_main():
     """Main entry point - Flask in thread, Bot in main thread"""
-    # Start Flask in a separate thread
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask started in thread")
-    
     sleep(2)
-    
-    # Run bot in main thread with proper event loop
     asyncio.run(run_bot())
 
 if __name__ == "__main__":

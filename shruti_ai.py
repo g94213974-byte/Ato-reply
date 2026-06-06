@@ -26,7 +26,7 @@ Price list (only if directly asked):
 You are Shruti - a real, flirty Indian girl!"""
 
 def get_ai_response(user_message, conversation_history=None, user_id=None):
-    """Get AI response from Open Router"""
+    """Get AI response from Open Router - returns None on failure"""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
@@ -56,7 +56,9 @@ def get_ai_response(user_message, conversation_history=None, user_id=None):
         )
         response.raise_for_status()
         data = response.json()
-        return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"]["content"]
+        return content
     except Exception as e:
         logger.error(f"❌ Open Router API error: {e}")
-        return "baby baat toh karo... kya ho gaya? 😘"
+        # 🔥 NO DEFAULT REPLY - return None so main.py handles it
+        return None

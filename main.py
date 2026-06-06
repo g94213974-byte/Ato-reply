@@ -4,7 +4,6 @@ import json
 import logging
 import random
 import shutil
-import sys
 from threading import Thread
 from time import sleep
 
@@ -52,7 +51,7 @@ DEFAULT_PRICE_LIST = """💕 **SHRUTI'S PRICE LIST** 💕
 Check my profile for payment details
 Then send me the SCREENSHOT here baby!"""
 
-# Shruti AI bot instance (global, ekbar create korbo)
+# Shruti AI bot instance
 shruti_bot = None
 
 def get_ai_bot():
@@ -60,6 +59,29 @@ def get_ai_bot():
     if shruti_bot is None:
         shruti_bot = ShrutiAIBot()
     return shruti_bot
+
+# ===== CONTEXTUAL FALLBACK REPLY (AI fail korle) =====
+def get_contextual_reply(msg_text):
+    """Generate a contextual reply based on user message - AI backup"""
+    msg_lower = msg_text.lower().strip()
+    
+    greetings = ['hi', 'hello', 'hey', 'hy', 'hlw', 'hii', 'hlo', 'helloo', 'halo', 'helo', 'heloo']
+    how_are = ['how are you', 'kemon acho', 'kasa hai', 'kaisa hai', 'kemon', 'kese ho', 'kaise ho']
+    name_questions = ['your name', 'apnar nam', 'tumar nam', 'name kya', 'nam ki', 'ke tumi', 'keya nam', 'kya nam']
+    payment_words = ['pay', 'payment', 'price', 'rate', 'dham', 'cost', 'koto', 'price list', 'kitne', 'kitna']
+    
+    if any(g in msg_lower for g in greetings):
+        return f"Hello baby! Kya haal hai aapke? 😘"
+    elif any(h in msg_lower for h in how_are):
+        return "Main bilkul theek hoon baby! Aap batao kya ho raha hai? 😘"
+    elif any(n in msg_lower for n in name_questions):
+        return "Mera naam Shruti hai baby! Aapka kya naam hai? 😊"
+    elif any(p in msg_lower for p in payment_words):
+        return "Payment details mere profile mein check karo baby! 😘"
+    elif len(msg_text) < 5:
+        return f"Haanji baby, kya bolna chahte ho? 😊"
+    else:
+        return f"Baby {msg_text} acha hai... aur batao kya chahte ho? 😘"
 
 # ===== SESSION MANAGEMENT =====
 def _save_sessions():
@@ -139,7 +161,7 @@ def _register_handler(client, acc_info):
         except Exception as e:
             logger.error(f"Handler error: {e}")
 
-# ===== ✅ IMPROVED AI MODE - BETTER RESPONSE HANDLING =====
+# ===== AI MODE - CUSTOM REPLY + AI + CONTEXTUAL FALLBACK =====
 async def handle_ai_mode(event, client, acc_info, sender_id):
     try:
         msg_text = event.message.text or ""
@@ -165,7 +187,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         except:
             pass
         
-        # Natural typing delay
+        # Natural delay
         await asyncio.sleep(random.uniform(0.5, 1.5))
         
         async with client.action(chat_id, "typing"):
@@ -195,26 +217,24 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                     ai_bot = get_ai_bot()
                     reply = ai_bot.get_reply(sender_id, msg_text, count)
                     
-                    # AI response validation
+                    # AI fail check - if None or empty, use contextual
                     if not reply or len(reply.strip()) < 2:
-                        logger.warning("⚠️ AI returned empty, retrying...")
-                        await asyncio.sleep(0.5)
-                        reply = ai_bot.get_reply(sender_id, msg_text, count)
-                        
-                        if not reply or len(reply.strip()) < 2:
-                            reply = get_contextual_reply(msg_text)
+                        logger.warning("⚠️ AI returned empty, using contextual...")
+                        await asyncio.sleep(0.3)
+                        reply = get_contextual_reply(msg_text)
+                    
+                    # Typing delay for AI
+                    typing_time = min(len(reply) * 0.02, 2.0)
+                    await asyncio.sleep(typing_time)
+                    
                 except Exception as ai_err:
-                    logger.error(f"AI error: {ai_err}")
+                    logger.error(f"❌ AI error: {ai_err}")
                     reply = get_contextual_reply(msg_text)
-                
-                # Typing simulation for AI
-                typing_time = min(len(reply) * 0.03, 3.0)
-                await asyncio.sleep(typing_time)
             
             # ===== STEP 3: SEND REPLY =====
             await event.respond(reply)
             
-            # Price list on 3rd message (only if not already sent)
+            # Price list on 3rd message
             if count == 2:
                 await asyncio.sleep(0.5)
                 try:
@@ -232,32 +252,10 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
     except Exception as e:
         logger.error(f"AI mode error: {e}")
         try:
-            await event.respond(get_contextual_reply(event.message.text or ""))
+            reply = get_contextual_reply(event.message.text or "")
+            await event.respond(reply)
         except:
             pass
-
-# ===== CONTEXTUAL FALLBACK REPLY (AI fail korle) =====
-def get_contextual_reply(msg_text):
-    """Generate a contextual reply based on user message"""
-    msg_lower = msg_text.lower().strip()
-    
-    greetings = ['hi', 'hello', 'hey', 'hy', 'hlw', 'hii', 'hlo', 'helloo', 'halo', 'helo']
-    how_are = ['how are you', 'kemon acho', 'kasa hai', 'kaisa hai', 'kemon']
-    name_questions = ['your name', 'apnar nam', 'tumar nam', 'name kya', 'nam ki', 'ke tumi']
-    payment_words = ['pay', 'payment', 'price', 'rate', 'dham', 'cost', 'koto', 'price list']
-    
-    if any(g in msg_lower for g in greetings):
-        return f"Hello baby! How are you? 😘"
-    elif any(h in msg_lower for h in how_are):
-        return "I'm fine baby! Just waiting for you... what's up? 😘"
-    elif any(n in msg_lower for n in name_questions):
-        return "I'm Shruti baby! Aapka apna sweetheart 😘💕"
-    elif any(p in msg_lower for p in payment_words):
-        return "Payment details share kar dungi baby... pehle baat toh karo 😘"
-    elif len(msg_text) < 5:
-        return f"Haan baby bolna kya chahte ho? 😊"
-    else:
-        return f"Hmm {msg_text}... interesting! Batao aur baby 😘"
 
 # ===== PAYMENT SCREENSHOT HANDLER =====
 async def handle_payment_screenshot(event, client, sender_id):
@@ -312,7 +310,6 @@ async def handle_keyword_mode(event, client, acc_info):
                     pass
             return
         
-        # Mark as read
         try:
             peer = await event.get_input_chat()
             await client(ReadHistoryRequest(peer=peer, max_id=event.message.id))

@@ -131,7 +131,7 @@ def _register_handler(client, acc_info):
         except Exception as e:
             logger.error(f"Handler error: {e}")
 
-# ===== ✅ FIXED: AI MODE - ONLY CUSTOM REPLIES + AI, NO HARDCODED DEFAULT =====
+# ===== ✅ FINAL FIXED: ONLY AI REPLY + ADMIN CUSTOM REPLIES =====
 async def handle_ai_mode(event, client, acc_info, sender_id):
     try:
         msg_text = event.message.text or ""
@@ -167,7 +167,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
             matched = False
             reply = None
             
-            # ===== STEP 1: CHECK CUSTOM REPLIES FIRST (Admin bot theke set kora) =====
+            # ===== STEP 1: CHECK CUSTOM REPLIES (jo tum admin bot se add karoge) =====
             for rid, keyword, reply_text, rtype in replies:
                 kw = keyword.lower().strip()
                 if rtype == "exact" and msg_lower == kw:
@@ -181,24 +181,21 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                     logger.info(f"✅ Custom contains match: {kw} in '{msg_lower[:30]}' -> {reply_text[:40]}...")
                     break
             
-            # ===== STEP 2: NO CUSTOM REPLY? USE AI ONLY =====
+            # ===== STEP 2: NO CUSTOM REPLY? AI REPLY ONLY =====
             if not matched:
                 logger.info(f"🤖 No custom reply found, using AI for: {msg_text[:40]}...")
                 reply = shruti_bot.get_reply(sender_id, msg_text, count)
                 
-                # AI response check - jodi AI fail kore tahole abar try korbo
+                # Agar AI fail kare to dobara try
                 if not reply or len(reply.strip()) < 3:
-                    logger.warning(f"⚠️ AI returned weak reply, retrying once...")
                     reply = shruti_bot.get_reply(sender_id, msg_text, count)
-                    
-                    # 2nd time o fail korle, AI thekei nibo, kono hardcoded reply noy
                     if not reply or len(reply.strip()) < 3:
-                        reply = f"Hmm {msg_text}? tell me more baby 😘"
+                        reply = f"Hmm {msg_text}? batao baby 😘"
             
-            # ===== STEP 3: SEND REPLY (SHUDHU CUSTOM REPLY + AI, KONO DEFAULT NEI) =====
+            # ===== STEP 3: SEND REPLY (SIRF AI YA CUSTOM REPLY) =====
             await event.respond(reply)
             
-            # Price list on 3rd message
+            # SIRF 3rd message pe price list bhejega (optional)
             if count == 2:
                 await asyncio.sleep(1.0)
                 price_image = get_setting('price_list_image', '')
@@ -207,21 +204,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                         price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
                         await client.send_file(chat_id, price_image, caption=price_text)
                     except:
-                        await event.respond(get_setting('price_list_text', DEFAULT_PRICE_LIST))
-                else:
-                    await event.respond(get_setting('price_list_text', DEFAULT_PRICE_LIST))
-            
-            # Payment reminder - shudhu 5th message theke
-            if count >= 5 and count % 5 == 0:
-                await asyncio.sleep(0.8)
-                reminders = [
-                    "baby pay karo na... screenshot bhejo 😘",
-                    "i am waiting for your payment baby 🔥",
-                    "pay karo na baby... screenshot bhejo 😈",
-                    "kab pay karoge? main wait kar rahi hoon 😘",
-                    "baby please pay... then we can have fun 🔥"
-                ]
-                await event.respond(random.choice(reminders))
+                        pass
             
             customer_message_count[sender_id] = count + 1
     

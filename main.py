@@ -1,4 +1,3 @@
-# main.py
 import asyncio
 import os
 import json
@@ -56,16 +55,19 @@ Then send me the SCREENSHOT here baby!"""
 # ===== SESSION MANAGEMENT =====
 def _save_sessions():
     sessions = [acc['session'] for acc in accounts if 'session' in acc and acc['session']]
-    with open(SESSION_FILE, 'w') as f:
-        json.dump(sessions, f, indent=2)
+    try:
+        with open(SESSION_FILE, 'w') as f:
+            json.dump(sessions, f, indent=2)
+    except Exception as e:
+        logger.error(f"Session save error: {e}")
 
 def _load_sessions():
     try:
         if os.path.exists(SESSION_FILE):
             with open(SESSION_FILE, 'r') as f:
                 return json.load(f)
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Session load error: {e}")
     return []
 
 # ===== ACCOUNT MANAGEMENT =====
@@ -100,8 +102,8 @@ async def start_all_accounts():
             try:
                 await start_single_account(session)
                 await asyncio.sleep(2)
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Account start error: {e}")
     logger.info(f"✅ {len(accounts)} accounts connected!")
 
 def _register_handler(client, acc_info):
@@ -129,7 +131,7 @@ def _register_handler(client, acc_info):
         except Exception as e:
             logger.error(f"Handler error: {e}")
 
-# ===== ✅ IMPORTANT: CUSTOM REPLY + AI COMBINATION =====
+# ===== AI MODE =====
 async def handle_ai_mode(event, client, acc_info, sender_id):
     try:
         msg_text = event.message.text or ""
@@ -855,20 +857,47 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Error: {context.error}")
 
+# ===== KEEP ALIVE FUNCTION =====
+async def keep_accounts_alive():
+    """Keep Telethon clients alive and reconnect if disconnected"""
+    while True:
+        try:
+            for acc in accounts:
+                try:
+                    client = acc['client']
+                    if not client.is_connected():
+                        logger.warning(f"🔄 Reconnecting: {acc['name']}")
+                        await client.connect()
+                        if not await client.is_user_authorized():
+                            await client.start()
+                        logger.info(f"✅ Reconnected: {acc['name']}")
+                except Exception as e:
+                    logger.error(f"Keep alive error for {acc.get('name', 'unknown')}: {e}")
+            await asyncio.sleep(30)
+        except Exception as e:
+            logger.error(f"Keep alive loop error: {e}")
+            await asyncio.sleep(30)
+
 # ===== BOT RUNNER =====
 async def run_bot():
     init_db()
     logger.info("✅ Database ready")
     await start_all_accounts()
     
+    # Start keep-alive task
+    asyncio.create_task(keep_accounts_alive())
+    logger.info("✅ Keep-alive task started")
+    
+    # Clean webhook if exists
     from telegram import Bot
     bot = Bot(token=BOT_TOKEN)
     try:
         await bot.delete_webhook()
         logger.info("✅ Old webhook deleted")
-    except:
-        pass
+    except Exception as e:
+        logger.info(f"Webhook clean: {e}")
     
+    # Setup bot application
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(MessageHandler(filters.ALL, message_handler))
@@ -877,10 +906,10 @@ async def run_bot():
     
     await app.initialize()
     await app.start()
-    logger.info("✅ Bot started!")
     await app.updater.start_polling()
-    logger.info("✅ Polling started!")
+    logger.info("✅ Bot started and polling!")
     
+    # Keep running
     try:
         await asyncio.Event().wait()
     finally:
@@ -892,12 +921,16 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 def run_main():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    bot_thread = Thread(target=lambda: loop.run_until_complete(run_bot()), daemon=True)
-    bot_thread.start()
-    sleep(3)
-    flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
+    """Main entry point - Flask in thread, Bot in main thread"""
+    # Start Flask in a separate thread
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("✅ Flask started in thread")
+    
+    sleep(2)
+    
+    # Run bot in main thread with proper event loop
+    asyncio.run(run_bot())
 
 if __name__ == "__main__":
     run_main()

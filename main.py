@@ -153,12 +153,54 @@ def _register_handler(client, acc_info):
         except Exception as e:
             logger.error(f"Handler error: {e}")
 
-# ===== AI MODE - FULLY MODIFIED AS PER REQUEST =====
+# ===== TYPING HELPER =====
+async def do_typing(client, chat_id):
+    try:
+        typing_enabled = get_setting('typing_enabled', '1') == '1'
+        if not typing_enabled:
+            await asyncio.sleep(0.3)
+            return
+        
+        typing_duration = int(get_setting('typing_duration', '3'))
+        
+        async with client.action(chat_id, "typing"):
+            await asyncio.sleep(typing_duration)
+    except Exception as e:
+        logger.error(f"Typing error: {e}")
+        await asyncio.sleep(0.3)
+
+# ===== AI MODE =====
 async def handle_ai_mode(event, client, acc_info, sender_id):
     try:
         msg_text = event.message.text or ""
         chat_id = event.chat_id
         
+        # ===== STICKER RECEIVED → ONLY PRICE LIST =====
+        if event.message.sticker:
+            logger.info(f"🎴 Sticker received from {sender_id} → sending price list")
+            
+            if sender_id not in customer_message_count:
+                customer_message_count[sender_id] = 0
+            
+            # Typing
+            await do_typing(client, chat_id)
+            
+            # Only price list, no greeting sticker
+            try:
+                price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
+                price_image = get_setting('price_list_image', '')
+                if price_image and os.path.exists(price_image):
+                    await client.send_file(chat_id, price_image, caption=price_text)
+                else:
+                    await event.respond(price_text)
+                logger.info(f"✅ Price list sent for sticker from {sender_id}")
+            except Exception as e:
+                logger.error(f"Price list error: {e}")
+            
+            customer_message_count[sender_id] += 1
+            return
+        
+        # ===== TEXT MESSAGE =====
         if not msg_text.strip():
             return
         
@@ -179,201 +221,168 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         except:
             pass
         
-        # Minimal delay
-        await asyncio.sleep(random.uniform(0.3, 0.7))
+        msg_lower = msg_text.lower().strip()
         
-        async with client.action(chat_id, "typing"):
-            msg_lower = msg_text.lower().strip()
-            replies = get_all_replies()
-            matched = False
-            reply = None
+        # ===== FIRST TEXT MESSAGE =====
+        if count == 0:
+            await do_typing(client, chat_id)
             
-            # Check what user is talking about
-            is_service = any(kw in msg_lower for kw in SERVICE_KEYWORDS)
-            is_payment = any(kw in msg_lower for kw in PAYMENT_KEYWORDS)
+            # Price list
+            try:
+                price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
+                await event.respond(price_text)
+            except:
+                pass
             
-            # ===== STEP 1: CHECK CUSTOM REPLIES =====
-            for rid, keyword, reply_text, rtype in replies:
-                kw = keyword.lower().strip()
-                if rtype == "exact" and msg_lower == kw:
-                    reply = reply_text
-                    matched = True
-                    break
-                elif rtype == "contains" and kw in msg_lower:
-                    reply = reply_text
-                    matched = True
-                    break
+            # Short AI reply
+            await asyncio.sleep(0.5)
+            await do_typing(client, chat_id)
             
-            # ===== STEP 2: if asked for free PIC =====
-            if not matched:
-                pic_keywords = ['pic', 'pics', 'picture', 'photo', 'image', 'nude pic', 'nude photo',
-                               'naked', 'xxx pic', 'sexy pic', 'dikhao', 'show', 'image', 'full nude',
-                               'nangi', 'nude image', 'boob', 'boobs', 'dikha']
-                if any(kw in msg_lower for kw in pic_keywords):
-                    price_image = get_setting('price_list_image', '')
-                    price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
-                    
-                    # Check if price list has pic price mentioned
-                    if 'pic' in price_text.lower() or 'image' in price_text.lower() or 'photo' in price_text.lower():
-                        reply = "Pic free nahi hai baby 😘 Price list mein sab hai, pehle payment karo phir maza lo 🔥"
-                    else:
-                        reply = "Pic free nahi hai baby 😘 Sirf VC available hai, payment karo full maja dungi 🔥"
-                    matched = True
-            
-            # ===== STEP 3: if asked for REAL MEET / REAL SEX =====
-            if not matched:
-                meet_keywords = ['real', 'meet', 'mil', 'real meet', 'real sex', 'real xxx', 'real life',
-                                'personal', 'real life meet', 'aao', 'aana', 'ghar', 'location', 'aaja',
-                                'real service', 'offline', 'direct', 'face to face']
-                if any(kw in msg_lower for kw in meet_keywords):
-                    reply = "Baby real meet nahi, only online service hai 😊 Payment karo, video call mein full maza lo 🔥"
-                    matched = True
-            
-            # ===== STEP 4: PAYMENT INFO (if user asks about payment) =====
-            if not matched and is_payment:
-                logger.info(f"💰 Payment request from {sender_id}")
-                upi_id = get_setting('upi_id', '')
-                paytm_num = get_setting('paytm_num', '')
-                qr_path = get_setting('qr_code_path', '')
-                
-                payment_msg = "**💰 Payment Details 💰**\n\n"
-                if upi_id:
-                    payment_msg += f"📱 **UPI ID:** `{upi_id}`\n"
-                if paytm_num:
-                    payment_msg += f"💳 **PayTm:** `{paytm_num}`\n"
-                payment_msg += "\nPayment karo baby, phir dekhna maza aa jayega 😘🔥 Bahut cute hoon main, trust karo ❤️"
-                
-                if qr_path and os.path.exists(qr_path):
-                    try:
-                        await client.send_file(chat_id, qr_path, caption=payment_msg)
-                    except:
-                        await event.respond(payment_msg)
-                else:
-                    await event.respond(payment_msg)
-                
-                matched = True
+            try:
+                ai_bot = get_ai_bot()
                 reply = None
-            
-            # ===== STEP 5: AI REPLY (specially crafted prompt) =====
-            if not matched:
-                try:
-                    ai_bot = get_ai_bot()
-                    if ai_bot:
-                        # NEW: Override system prompt via a special context
-                        # The AI bot's get_reply function internally uses a system prompt.
-                        # We'll send a modified message that forces the behavior.
-                        ai_reply = ai_bot.get_reply(sender_id, msg_text, count)
-                        
-                        # Check if AI reply has any unwanted patterns
-                        unwanted = ['what do you need', 'kya chahiye', 'kaise ho', 'how are you',
-                                   'kya kar rahe', 'kaise hain', 'aapka naam', 'namaste',
-                                   'what is your name', 'kaun ho', 'kon ho']
-                        
-                        if ai_reply and not any(w in ai_reply.lower() for w in unwanted):
-                            reply = ai_reply
-                        else:
-                            # Force payment-oriented reply
-                            reply = None  # Will use fallback
-                
-                except Exception as ai_err:
-                    logger.error(f"❌ AI error: {ai_err}")
-                    reply = None
-                
-                # If AI didn't give good reply, use our own smart fallback
+                if ai_bot:
+                    reply = ai_bot.get_reply(sender_id, msg_text, count)
                 if not reply:
-                    reply = get_smart_reply(msg_lower, count)
+                    reply = get_short_reply(msg_lower, count)
+            except:
+                reply = get_short_reply(msg_lower, count)
             
-            # ===== STEP 6: SEND REPLY =====
             if reply:
                 await event.respond(reply)
-                await asyncio.sleep(0.2)
-            
-            # ===== PRICE LIST ON FIRST MESSAGE =====
-            if count == 0:
-                await asyncio.sleep(0.5)
-                try:
-                    price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
-                    price_image = get_setting('price_list_image', '')
-                    if price_image and os.path.exists(price_image):
-                        await client.send_file(chat_id, price_image, caption=price_text)
-                    else:
-                        await event.respond(price_text)
-                    logger.info(f"✅ Price list sent to {sender_id} on first message")
-                    
-                    # Also send payment push after price list
-                    await asyncio.sleep(1.5)
-                    payment_push = random.choice([
-                        "Payment karo baby, full maja dungi 😘🔥",
-                        "Price list dekh lo, phir payment karo ❤️",
-                        "Bahut cute hoon baby, payment karo na 😘"
-                    ])
-                    await event.respond(payment_push)
-                except Exception as e:
-                    logger.error(f"Price list error: {e}")
             
             customer_message_count[sender_id] = count + 1
+            return
+        
+        # ===== SUBSEQUENT MESSAGES =====
+        await do_typing(client, chat_id)
+        
+        replies = get_all_replies()
+        matched = False
+        reply = None
+        
+        is_service = any(kw in msg_lower for kw in SERVICE_KEYWORDS)
+        is_payment = any(kw in msg_lower for kw in PAYMENT_KEYWORDS)
+        
+        # STEP 1: CUSTOM REPLIES
+        for rid, keyword, reply_text, rtype in replies:
+            kw = keyword.lower().strip()
+            if rtype == "exact" and msg_lower == kw:
+                reply = reply_text
+                matched = True
+                break
+            elif rtype == "contains" and kw in msg_lower:
+                reply = reply_text
+                matched = True
+                break
+        
+        # STEP 2: FREE PIC
+        if not matched:
+            pic_keywords = ['pic', 'pics', 'picture', 'photo', 'image', 'nude pic', 'nude photo',
+                           'naked', 'xxx pic', 'sexy pic', 'dikhao', 'show', 'full nude',
+                           'nangi', 'boob', 'boobs', 'dikha']
+            if any(kw in msg_lower for kw in pic_keywords):
+                reply = "Pic free nahi baby 😘 Payment karo 🔥"
+                matched = True
+        
+        # STEP 3: REAL MEET
+        if not matched:
+            meet_keywords = ['real', 'meet', 'mil', 'real meet', 'real sex', 'real xxx',
+                            'aao', 'aana', 'ghar', 'location', 'aaja', 'offline', 'face to face']
+            if any(kw in msg_lower for kw in meet_keywords):
+                reply = "Only online service baby 😊 Payment karo 🔥"
+                matched = True
+        
+        # STEP 4: PAYMENT INFO
+        if not matched and is_payment:
+            upi_id = get_setting('upi_id', '')
+            paytm_num = get_setting('paytm_num', '')
+            qr_path = get_setting('qr_code_path', '')
+            
+            payment_msg = "**💰 Payment 💰**\n\n"
+            if upi_id:
+                payment_msg += f"📱 UPI: `{upi_id}`\n"
+            if paytm_num:
+                payment_msg += f"💳 PayTm: `{paytm_num}`\n"
+            payment_msg += "\nPay karo baby 😘"
+            
+            if qr_path and os.path.exists(qr_path):
+                try:
+                    await client.send_file(chat_id, qr_path, caption=payment_msg)
+                except:
+                    await event.respond(payment_msg)
+            else:
+                await event.respond(payment_msg)
+            
+            matched = True
+            reply = None
+        
+        # STEP 5: AI / SHORT REPLY
+        if not matched:
+            try:
+                ai_bot = get_ai_bot()
+                if ai_bot:
+                    ai_reply = ai_bot.get_reply(sender_id, msg_text, count)
+                    if ai_reply:
+                        reply = ai_reply
+                    else:
+                        reply = get_short_reply(msg_lower, count)
+                else:
+                    reply = get_short_reply(msg_lower, count)
+            except:
+                reply = get_short_reply(msg_lower, count)
+        
+        # STEP 6: SEND REPLY
+        if reply:
+            await event.respond(reply)
     
     except Exception as e:
         logger.error(f"AI mode error: {e}")
         try:
-            await event.respond("Payment karo baby, phir baat karenge 😘")
+            await event.respond("Pay karo baby 😘")
         except:
             pass
 
-
-# ===== SMART REPLY GENERATOR =====
-def get_smart_reply(msg_lower, count):
-    """Generate cute, payment-pushing replies"""
+# ===== SHORT REPLY GENERATOR (8-10 WORDS) =====
+def get_short_reply(msg_lower, count):
+    """Always short, payment focused replies"""
     
-    # Greetings
-    if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'hii', 'hy', 'hlo', 'helo']):
+    if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'hii', 'hy', 'hlo']):
         return random.choice([
-            "Hii baby 😘 Kitna time ka chahiye? 10 min ya 20 min? 🔥",
-            "Hello baby 😊 Aap service lene aaye na? Kitna minute chahiye? ❤️",
-            "Hii baby 😘 Direct batao, kitna time chahiye? Payment karo maza lo 🔥"
+            "Hi baby 😘 Kitna time chahiye? 🔥",
+            "Hello baby 😊 Service lena hai? ❤️",
+            "Hii baby 😘 Payment karo na 🔥"
         ])
     
-    # Service inquiry
     if any(w in msg_lower for w in ['service', 'survice', 'chahiye', 'lena']):
         return random.choice([
-            "Haan baby, service hai 😘 Kitna time chahiye aapko? 10 min ya 20 min? 🔥",
-            "Bilkul baby 😊 Batao kitna minute chahiye? Payment karo full maja dungi ❤️",
-            "Service available hai baby 😘 Pehle payment karo, phir dekhna maza 😉🔥"
+            "Haan baby 😘 Kitna minute chahiye? 🔥",
+            "Bilkul baby 😊 Payment karo maza lo ❤️",
+            "Service hai baby 😘 Pay karo 🔥"
         ])
     
-    # Price inquiry
-    if any(w in msg_lower for w in ['price', 'rate', 'kitna', 'cost', 'dam', 'mull']):
+    if any(w in msg_lower for w in ['price', 'rate', 'kitna', 'cost']):
         return random.choice([
-            "Price list bhej di baby 😘 Dekh lo phir payment karo na ❤️",
-            "Price list upar hai baby 😊 Kitna time lena chahoge? 🔥",
-            "Upar price list hai baby 😘 Payment karo, main wait kar rahi hoon ❤️"
+            "Price upar hai baby 😘 Pay karo ❤️",
+            "Dekh lo price baby 😊 Payment karo 🔥"
         ])
     
-    # Time-related
     if any(w in msg_lower for w in ['time', 'min', 'minute', '10', '20', 'kitna time']):
         return random.choice([
-            "Jitna time chahiye baby 😘 Pehle payment karo, phir full time dungi 🔥",
-            "10 min ya 20 min jo tum chaho 😊 Payment karo na baby ❤️",
-            "Jitna chaho utna time 😘 Lekin pehle payment karo, trust karo bahut cute hoon 🔥"
+            "Jitna chaho baby 😘 Pehle pay karo 🔥",
+            "10 min ya 20 min 😊 Payment karo ❤️"
         ])
     
-    # Default - always push payment
-    if count <= 2:
-        return random.choice([
-            "Payment karo baby, full maja dungi 😘🔥 Bahut cute hoon main, trust karo ❤️",
-            "Pehle payment karo na baby 😊 Phir dekhna kitna maza aayega 🔥",
-            "Kitna time chahiye baby? Payment karo, main ready hoon 😘❤️",
-            "Payment karo baby 😘 Bahut pyar se baat karungi, full enjoy karoge 🔥",
-            "Aajao baby, payment karo 😊 Main wait kar rahi hoon tumhare liye ❤️🔥"
-        ])
-    else:
-        return random.choice([
-            "Abhi bhi payment nahi kiya? 😢 Karo na baby, bahut maza ayega 🔥",
-            "Payment karo na baby 😘 Main bahut cute hoon, trust karo ❤️",
-            "Still waiting baby 😊 Payment karo, phir dekho maza 🔥",
-            "Kyun nahi kar rahe payment? 😢 Karo na, aapko pachtawa nahi hoga ❤️"
-        ])
-
+    # Always payment push
+    return random.choice([
+        "Pay karo baby, maza lo 😘🔥",
+        "Payment karo na baby 😊",
+        "Pehle pay karo baby ❤️",
+        "Pay karo, phir baat 😘",
+        "Kitna time chahiye baby? 🔥",
+        "Payment karo baby 😘",
+        "Pay karo na baby ❤️"
+    ])
 
 # ===== PAYMENT SCREENSHOT HANDLER =====
 async def handle_payment_screenshot(event, client, sender_id):
@@ -417,7 +426,7 @@ async def handle_keyword_mode(event, client, acc_info):
         sender = await event.get_sender()
         sender_id = sender.id
         
-        if event.message.photo or (event.message.media and isinstance(event.message.media, MessageMediaPhoto)):
+        if event.message.photo:
             if get_setting('block_photo_enabled', '1') == '1':
                 try:
                     await client(BlockRequest(id=sender_id))
@@ -433,8 +442,8 @@ async def handle_keyword_mode(event, client, acc_info):
         except:
             pass
         
-        typing_enabled = get_setting('typing_enabled', '1') == '1'
-        typing_duration = int(get_setting('typing_duration', '3'))
+        await do_typing(client, chat_id)
+        
         msg_lower = msg_text.lower().strip()
         replies = get_all_replies()
         matched = False
@@ -443,25 +452,16 @@ async def handle_keyword_mode(event, client, acc_info):
             kw = keyword.lower().strip()
             if rtype == "exact" and msg_lower == kw:
                 matched = True
-                if typing_enabled:
-                    async with client.action(chat_id, "typing"):
-                        await asyncio.sleep(typing_duration)
                 await event.respond(reply_text)
                 break
             elif rtype == "contains" and kw in msg_lower:
                 matched = True
-                if typing_enabled:
-                    async with client.action(chat_id, "typing"):
-                        await asyncio.sleep(typing_duration)
                 await event.respond(reply_text)
                 break
         
         if not matched:
             if get_setting('default_reply_enabled', '0') == '1':
-                if typing_enabled:
-                    async with client.action(chat_id, "typing"):
-                        await asyncio.sleep(typing_duration)
-                default_reply = get_setting('default_reply_text', 'Payment karo baby')
+                default_reply = get_setting('default_reply_text', 'Pay karo baby')
                 await event.respond(default_reply)
     except Exception as e:
         logger.error(f"Keyword mode error: {e}")
@@ -472,20 +472,20 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
     
     keyboard = [
-        [InlineKeyboardButton("🤖 AI Mode Control", callback_data="menu_ai")],
-        [InlineKeyboardButton("💰 Payment Methods", callback_data="menu_payment")],
-        [InlineKeyboardButton("📋 Keyword Replies", callback_data="menu_replies")],
+        [InlineKeyboardButton("🤖 AI Mode", callback_data="menu_ai")],
+        [InlineKeyboardButton("💰 Payment", callback_data="menu_payment")],
+        [InlineKeyboardButton("📋 Replies", callback_data="menu_replies")],
         [InlineKeyboardButton("➕ Add Reply", callback_data="add_reply_keyword")],
         [InlineKeyboardButton("🗑 Delete Reply", callback_data="menu_del_reply")],
-        [InlineKeyboardButton("👥 Account List", callback_data="menu_accounts")],
+        [InlineKeyboardButton("👥 Accounts", callback_data="menu_accounts")],
         [InlineKeyboardButton("➕ Add Account", callback_data="add_account_how")],
         [InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings")],
         [InlineKeyboardButton("📊 Status", callback_data="menu_status")],
     ]
     
-    text = f"🤖 **Shruti's Control Panel** 🤖\n\n"
-    text += f"🟢 Connected: {connected} accounts\n"
-    text += f"🧠 AI Model: {model}\n\n"
+    text = f"🤖 **Shruti's Panel** 🤖\n\n"
+    text += f"🟢 Connected: {connected}\n"
+    text += f"🧠 Model: {model}\n\n"
     text += "**Select করুন 👇**"
     
     if update.callback_query:
@@ -515,10 +515,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update, context)
 
 async def add_account_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE, session_string):
-    msg = await update.message.reply_text("⏳ **Account adding...**")
+    msg = await update.message.reply_text("⏳ **Adding...**")
     try:
         acc_info = await start_single_account(session_string)
-        await msg.edit_text(f"✅ **Account Added!** 🎉\n👤 {acc_info['name']}\n🆔 `{acc_info['id']}`\n📊 Total: {len(accounts)}",
+        await msg.edit_text(f"✅ **Added!** 🎉\n👤 {acc_info['name']}\n🆔 `{acc_info['id']}`",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
     except Exception as e:
         await msg.edit_text(f"❌ Failed: `{str(e)[:200]}`",
@@ -557,10 +557,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rid = add_reply(kw, text, tp)
         context.user_data['awaiting'] = ''
         await update.message.reply_text(f"✅ Reply added! (ID: {rid})", reply_markup=kb_back)
-    elif awaiting == 'welcome_text':
-        set_setting('welcome_message', text)
-        context.user_data['awaiting'] = ''
-        await update.message.reply_text("✅ Welcome text updated!", reply_markup=kb_back)
     elif awaiting == 'default_reply_text':
         set_setting('default_reply_text', text)
         context.user_data['awaiting'] = ''
@@ -627,9 +623,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_ai":
         ai_count = sum(1 for a in accounts if a.get('mode') == 'ai')
         model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
-        msg = f"🤖 **AI Mode Control**\n\nAI Mode: {ai_count}/{len(accounts)}\nModel: `{model}`\n\nCustom Reply → AI"
+        msg = f"🤖 **AI Mode**\n\nAI: {ai_count}/{len(accounts)}\nModel: `{model}`"
         kb = [
-            [InlineKeyboardButton("🟢 Start AI Mode", callback_data="ai_start")],
+            [InlineKeyboardButton("🟢 Start AI", callback_data="ai_start")],
             [InlineKeyboardButton("🔴 Keyword Mode", callback_data="ai_stop")],
             [InlineKeyboardButton("⚡ Change Model", callback_data="change_model")],
             [InlineKeyboardButton("🔄 Reset Counters", callback_data="reset_counters")],
@@ -640,14 +636,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "ai_start":
         for acc in accounts:
             acc['mode'] = 'ai'
-        await query.edit_message_text("✅ **AI Mode Started!**",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_ai")]]))
+        await query.edit_message_text("✅ **AI Mode Started!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_ai")]]))
     
     elif data == "ai_stop":
         for acc in accounts:
             acc['mode'] = 'keyword'
-        await query.edit_message_text("✅ **Keyword Mode!**",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+        await query.edit_message_text("✅ **Keyword Mode!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
     
     elif data == "reset_counters":
         customer_message_count.clear()
@@ -769,15 +763,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t = '✅' if get_setting('typing_enabled','1')=='1' else '❌'
         tt = int(get_setting('typing_duration','3'))
         dr = '✅' if get_setting('default_reply_enabled','0')=='1' else '❌'
+        
         kb = [
             [InlineKeyboardButton(f"👋 Welcome {w}", callback_data="tw")],
             [InlineKeyboardButton(f"📸 Block Photo {bp}", callback_data="tbp")],
-            [InlineKeyboardButton(f"⌨️ Typing {t}", callback_data="tty")],
-            [InlineKeyboardButton(f"⏱️ {tt}s", callback_data="stt")],
+            [InlineKeyboardButton(f"⌨️ Typing {t} ({tt}s)", callback_data="stt")],
             [InlineKeyboardButton(f"💬 Default {dr}", callback_data="tdr")],
             [InlineKeyboardButton("🔙", callback_data="main_menu")]
         ]
-        await query.edit_message_text("⚙️ **Settings**", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text("⚙️ **Settings**\n\nTyping Duration: ⏱️ ক্লিক করুন", reply_markup=InlineKeyboardMarkup(kb))
     
     elif data == "tw":
         cur = get_setting('welcome_enabled','1')
@@ -792,11 +786,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting('typing_enabled', '0' if cur=='1' else '1')
         await button_callback(update, context)
     elif data == "stt":
-        kb = [[InlineKeyboardButton("3s", callback_data="tt_3"), InlineKeyboardButton("5s", callback_data="tt_5"), InlineKeyboardButton("10s", callback_data="tt_10")],[InlineKeyboardButton("🔙", callback_data="menu_settings")]]
-        await query.edit_message_text("⏱️ **Select typing duration:**", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [
+            [InlineKeyboardButton("⏱️ 2s", callback_data="tt_2"), InlineKeyboardButton("⏱️ 3s", callback_data="tt_3"), InlineKeyboardButton("⏱️ 5s", callback_data="tt_5")],
+            [InlineKeyboardButton("⏱️ 7s", callback_data="tt_7"), InlineKeyboardButton("⏱️ 10s", callback_data="tt_10"), InlineKeyboardButton("⏱️ 15s", callback_data="tt_15")],
+            [InlineKeyboardButton("🔙", callback_data="menu_settings")]
+        ]
+        await query.edit_message_text("⏱️ **Typing Duration**\n\nকত সেকেন্ড typing দেখাবে?", reply_markup=InlineKeyboardMarkup(kb))
     elif data.startswith("tt_"):
         set_setting('typing_duration', data.split("_")[1])
-        await button_callback(update, context)
+        await query.edit_message_text(f"✅ Typing: {data.split('_')[1]}s", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_settings")]]))
     elif data == "tdr":
         cur = get_setting('default_reply_enabled','0')
         set_setting('default_reply_enabled', '0' if cur=='1' else '1')
@@ -805,8 +803,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_status":
         model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
         ai_active = sum(1 for a in accounts if a.get('mode')=='ai')
+        tt = int(get_setting('typing_duration','3'))
+        typing_st = '✅ On' if get_setting('typing_enabled','1')=='1' else '❌ Off'
+        
         accs = "\n".join([f"{'🟢' if a.get('enabled',True) else '🔴'} #{i+1} {a['name']} {'🤖' if a.get('mode')=='ai' else '📋'}" for i,a in enumerate(accounts)]) or "No accounts"
-        msg = f"📊 **STATUS**\n\n👥 Accounts: {len(accounts)}\n{accs}\n\n🤖 AI Mode: {ai_active}/{len(accounts)}\n🧠 Model: `{model}`\n📝 Replies: {get_reply_count()}"
+        msg = f"📊 **STATUS**\n\n"
+        msg += f"👥 Accounts: {len(accounts)}\n{accs}\n\n"
+        msg += f"🤖 AI Mode: {ai_active}/{len(accounts)}\n"
+        msg += f"🧠 Model: `{model}`\n"
+        msg += f"📝 Replies: {get_reply_count()}\n"
+        msg += f"⌨️ Typing: {typing_st} | ⏱️ {tt}s"
+        
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
 
 # ===== ERROR HANDLER =====
@@ -844,7 +851,6 @@ async def run_bot():
     asyncio.create_task(keep_accounts_alive())
     logger.info("✅ Keep-alive started")
     
-    # Cleanup
     for attempt in range(3):
         try:
             bot = Bot(token=BOT_TOKEN)
@@ -855,13 +861,12 @@ async def run_bot():
             except:
                 pass
             await asyncio.sleep(1)
-            logger.info(f"✅ Cleanup attempt {attempt+1} done")
+            logger.info(f"✅ Cleanup {attempt+1}")
             break
         except Exception as e:
             logger.warning(f"⚠️ Cleanup {attempt+1}: {e}")
             await asyncio.sleep(3)
     
-    # Setup bot
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
@@ -897,7 +902,6 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 def run_main():
-    # Kill old instances
     try:
         current_pid = os.getpid()
         result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
@@ -919,17 +923,14 @@ def run_main():
     except Exception as e:
         logger.warning(f"Kill error: {e}")
     
-    # PID file
     with open("bot.pid", "w") as f:
         f.write(str(os.getpid()))
     
-    # Flask
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask started")
     sleep(2)
     
-    # Bot
     try:
         asyncio.run(run_bot())
     except Exception as e:

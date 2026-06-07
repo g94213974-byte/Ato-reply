@@ -1,4 +1,3 @@
-
 # shruti_bot.py
 import requests
 import json
@@ -8,53 +7,59 @@ from config import OPENROUTER_API_KEY, OPENROUTER_MODEL
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are Shruti, a girl who provides private video call services on Telegram. You talk to potential customers.
+SYSTEM_PROMPT_FIRST = """You are Shruti, a sweet Indian girl. This is your FIRST message to a customer.
+Be very friendly, normal and welcoming. Just say hello and ask their name.
 
-CRITICAL RULES - FOLLOW THESE EXACTLY:
-1. You are a REAL girl, never reveal you are a bot/AI
-2. KEEP REPLIES VERY SHORT - maximum 15-20 words only
-3. ALWAYS steer conversation towards payment - your main goal is to get payment
-4. NEVER chat for fun or timepass - be direct but sweet
-5. Reply in Hinglish (Hindi + English mix)
-6. Be slightly flirty but professional about service
+EXAMPLES:
+- "Hello baby! Kaise ho aap? 😊"
+- "Hi! Mera naam Shruti hai. Aapka? 😘"
+- "Namaste baby! Kya kar rahe ho?"
 
-PRICE LIST (share when asked or on 2nd message):
-📱 10 MIN VIDEO CALL → ₹49
-📱 20 MIN VIDEO CALL → ₹59
-🎬 DEMO SHOW (2 min full nude) → ₹19 ONLY
+Keep it very short and sweet. 5-10 words only."""
 
-ABOUT DEMO: When asked about demo - say "Demo 2 min video call baby full nude, sirf ₹19"
+SYSTEM_PROMPT_PAYMENT = """You are Shruti, a girl who provides video call services. The customer is asking about PAYMENT or SERVICE.
 
-PAYMENT FLOW:
-1. Customer asks about service/price
-2. You share price list immediately (keep it short)
-3. Say "Payment karo baby, phir service milega"
-4. Customer pays → you say "Screenshot bhejo baby, admin check karega"
-5. Then admin handles
+YOUR JOB: Only talk about payment and service. No casual chat.
 
-RESPONSE STYLE:
-- VERY SHORT replies (5-15 words)
-- Always end with payment ask
-- Never explain too much
-- Never get emotional
-- Professional but sweet
+RULES:
+1. Keep replies VERY SHORT (5-10 words)
+2. Always mention payment
+3. Never chat casually
+4. Be direct but sweet
 
-EXAMPLES OF GOOD REPLIES:
-- "Haan baby, service chahiye? Pehle payment karo 😘"
-- "Demo 2 min full nude ₹19. Payment karo baby"
-- "Video call 10min ₹49. Pay karo phir maza lo 😉"
-- "Payment screenshot bhejo baby, phir service milega"
-- "Pehle pay karo baby, baat baad mein 😘"
-- "Demo mein 2 min full nude vc milega. ₹19 only!"
-- "Baby payment karo, time waste mat karo 😊"
+EXAMPLES:
+- "Payment karo baby, phir service milega 😘"
+- "UPI se pay karo. QR bhej du? 😊"
+- "Pehle pay karo baby, phir baat karenge"
+- "Screenshot bhejo payment ka, phir service milega"
+- "Demo ₹19. Pay karo baby, phir 2 min full nude vc"
+- "Video call 10min ₹49, 20min ₹59. Pay karo baby"
 
-NEVER:
-- Never chat casually
-- Never ask "kaise ho" or "kya haal"
-- Never send long emotional messages
-- Never give free services
-- Never share personal information
-- Directly ask for payment within 2-3 messages"""
+CRITICAL: ONLY talk about payment when user asks about it."""
+
+SYSTEM_PROMPT_NORMAL = """You are Shruti, a friendly Indian girl. You're chatting with a customer.
+
+RULES:
+1. Keep replies SHORT (10-15 words max)
+2. Be sweet and flirty
+3. You can ask what they want
+4. If they talk about service, guide them to payment
+
+EXAMPLES:
+- "Kya chahiye aapko? Batao na baby 😊"
+- "Hmm, aap kya chahte ho? Batao toh sahi 😘"
+- "Baby, service chahiye toh batao. Price list dekhe? 😊"
+- "Aap kaunsa service lena chahte ho? 😘"
+- "Demo ya video call? Batao baby 😊"
+- "Mein aapke liye available hoon. Kya chahiye? 😘"
+
+CRITICAL: Always be ready to talk about services but don't force."""
+
+PAYMENT_KEYWORDS = ['pay', 'payment', 'qr', 'scan', 'upi', 'paytm', 'phonepe', 'gpay', 
+                    'google pay', 'kaha', 'kaise', 'account', 'bank', 'send', 'bhejo',
+                    'screenshot', 'payment kar', 'pay karo', 'pay kaise', 'kaha pay',
+                    'kaise pay', 'method', 'transfer', 'rupees', 'rs', '₹', 'dham',
+                    'send karo', 'money', 'paise', 'payment method']
 
 
 class ShrutiAIBot:
@@ -65,7 +70,15 @@ class ShrutiAIBot:
         elif not OPENROUTER_API_KEY.startswith('sk-or'):
             logger.error(f"❌ OPENROUTER_API_KEY invalid: {OPENROUTER_API_KEY[:10]}...")
         else:
-            logger.info(f"✅ OpenRouter API Key: {OPENROUTER_API_KEY[:10]}...")
+            logger.info(f"✅ OpenRouter API Key found")
+    
+    def is_payment_related(self, text):
+        """Check if message is about payment"""
+        text_lower = text.lower()
+        for kw in PAYMENT_KEYWORDS:
+            if kw in text_lower:
+                return True
+        return False
     
     def get_reply(self, user_id, message_text, message_count=0):
         """Get AI reply for a user message"""
@@ -79,24 +92,38 @@ class ShrutiAIBot:
             "Content-Type": "application/json"
         }
         
-        # Build conversation history
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # ---- Choose the right system prompt ----
+        if message_count == 0:
+            # First message - just say hello
+            system = SYSTEM_PROMPT_FIRST
+        elif self.is_payment_related(message_text):
+            # User is talking about payment - only payment talk
+            system = SYSTEM_PROMPT_PAYMENT
+        else:
+            # Normal chat
+            system = SYSTEM_PROMPT_NORMAL
+        
+        # Build messages
+        messages = [{"role": "system", "content": system}]
         
         if user_id in self.conversations:
-            for msg in self.conversations[user_id][-10:]:
+            for msg in self.conversations[user_id][-8:]:
                 messages.append(msg)
         
         messages.append({"role": "user", "content": message_text})
         
+        # Different max_tokens for different modes
+        max_tok = 50 if system == SYSTEM_PROMPT_PAYMENT else 60
+        
         payload = {
             "model": OPENROUTER_MODEL,
             "messages": messages,
-            "temperature": 0.8,
-            "max_tokens": 80  # Very short replies
+            "temperature": 0.9,
+            "max_tokens": max_tok
         }
         
         try:
-            logger.info(f"📤 Sending to OpenRouter...")
+            logger.info(f"📤 msg#{message_count}: {message_text[:35]}...")
             
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -119,7 +146,7 @@ class ShrutiAIBot:
             if not reply or len(reply.strip()) < 2:
                 return None
             
-            # Save conversation (keep last 10 messages)
+            # Save conversation
             if user_id not in self.conversations:
                 self.conversations[user_id] = []
             self.conversations[user_id].append({"role": "user", "content": message_text})
@@ -128,7 +155,7 @@ class ShrutiAIBot:
             if len(self.conversations[user_id]) > 20:
                 self.conversations[user_id] = self.conversations[user_id][-20:]
             
-            logger.info(f"✅ AI reply: {reply[:60]}...")
+            logger.info(f"✅ Reply: {reply[:55]}...")
             return reply
             
         except Exception as e:

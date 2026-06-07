@@ -1,6 +1,5 @@
 flask
-python-telegram-bot
+python-telegram-bot==21.10
 telethon
 requests
-cryptg
 gunicorn

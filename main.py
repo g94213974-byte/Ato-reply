@@ -52,6 +52,16 @@ DEFAULT_PRICE_LIST = """💰 **SHRUTI PRICE LIST** 💰
 
 💳 **Pay karo baby, phir maza lo!** 😘"""
 
+SERVICE_KEYWORDS = ['service', 'servic', 'survice', 'sarvice', 'lena hai', 'chahiye', 'kharid', 
+                    'leni hai', 'demo', 'video', 'call', 'vc', 'price', 'rate', 'kya milega',
+                    'kya service', 'kaam', 'kya hai', 'dikhao', 'show']
+
+PAYMENT_KEYWORDS = ['pay', 'payment', 'qr', 'scan', 'upi', 'paytm', 'phonepe', 'gpay', 
+                    'google pay', 'kaha', 'kaise', 'account', 'bank', 'send', 'bhejo',
+                    'screenshot', 'payment kar', 'pay karo', 'pay kaise', 'kaha pay',
+                    'kaise pay', 'method', 'transfer', 'rupees', 'rs', '₹', 'dham',
+                    'send karo', 'money', 'paise', 'payment method']
+
 # Shruti AI bot instance
 shruti_bot = None
 
@@ -60,25 +70,37 @@ def get_ai_bot():
     if shruti_bot is None:
         try:
             shruti_bot = ShrutiAIBot()
-            logger.info("✅ Shruti AI Bot initialized successfully")
+            logger.info("✅ Shruti AI Bot initialized")
         except Exception as e:
             logger.error(f"❌ Failed to init AI bot: {e}")
     return shruti_bot
 
-# ===== MINIMAL FALLBACK - Payment focused =====
-def get_minimal_fallback(msg_text):
-    """Only used when AI completely fails"""
-    payment_replies = [
-        "Payment karo baby, phir service milega 😘",
-        "Pehle pay karo baby, bad mein baat karenge 😉",
-        "Service chahiye? Toh payment karo pehle 😊",
-        "Baby, payment karo phir sab milega 🔥",
-        "Pay karo baby, main ready hoon aapke liye 😘",
-        "Demo chahiye? ₹19 pay karo baby",
-        "Video call 10min ₹49. Pay karo phir maza lo 😉",
-        "Payment screenshot bhejo baby, phir service milega"
+# ===== FALLBACK REPLIES =====
+def get_normal_fallback():
+    replies = [
+        "Hello baby! Kaise ho? 😊",
+        "Hi baby! Kya kar rahe ho? 😘",
+        "Namaste baby! Aapka naam? 😊",
+        "Kya chahiye aapko? Batao na 😘"
     ]
-    return random.choice(payment_replies)
+    return random.choice(replies)
+
+def get_payment_fallback():
+    replies = [
+        "Payment karo baby, phir service milega 😘",
+        "UPI QR bhej du? Pay karo baby 😊",
+        "Pehle pay karo baby, phir baat karenge 😉",
+        "Payment screenshot bhejo baby, phir service milega 🔥"
+    ]
+    return random.choice(replies)
+
+def get_service_fallback():
+    replies = [
+        "Service chahiye? Price list bhej du? 😊",
+        "Demo ₹19, video call ₹49 se start. Batao baby 😘",
+        "Kya service lena chahte ho? Batao na 😊"
+    ]
+    return random.choice(replies)
 
 # ===== SESSION MANAGEMENT =====
 def _save_sessions():
@@ -158,7 +180,7 @@ def _register_handler(client, acc_info):
         except Exception as e:
             logger.error(f"Handler error: {e}")
 
-# ===== AI MODE - Payment Girl Character =====
+# ===== AI MODE =====
 async def handle_ai_mode(event, client, acc_info, sender_id):
     try:
         msg_text = event.message.text or ""
@@ -184,8 +206,8 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         except:
             pass
         
-        # Minimal delay - fast response
-        await asyncio.sleep(random.uniform(0.3, 0.8))
+        # Minimal delay
+        await asyncio.sleep(random.uniform(0.3, 0.7))
         
         async with client.action(chat_id, "typing"):
             msg_lower = msg_text.lower().strip()
@@ -193,44 +215,80 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
             matched = False
             reply = None
             
-            # ===== STEP 1: CUSTOM REPLIES =====
+            # Check what user is talking about
+            is_service = any(kw in msg_lower for kw in SERVICE_KEYWORDS)
+            is_payment = any(kw in msg_lower for kw in PAYMENT_KEYWORDS)
+            
+            # ===== STEP 1: CHECK CUSTOM REPLIES =====
             for rid, keyword, reply_text, rtype in replies:
                 kw = keyword.lower().strip()
                 if rtype == "exact" and msg_lower == kw:
                     reply = reply_text
                     matched = True
-                    logger.info(f"✅ Custom exact match: {kw}")
                     break
                 elif rtype == "contains" and kw in msg_lower:
                     reply = reply_text
                     matched = True
-                    logger.info(f"✅ Custom contains match: {kw}")
                     break
             
-            # ===== STEP 2: AI REPLY =====
+            # ===== STEP 2: PAYMENT INFO (if user asks about payment) =====
+            if not matched and is_payment:
+                logger.info(f"💰 Payment request from {sender_id}")
+                upi_id = get_setting('upi_id', '')
+                paytm_num = get_setting('paytm_num', '')
+                qr_path = get_setting('qr_code_path', '')
+                
+                payment_msg = "**💰 Payment Details 💰**\n\n"
+                if upi_id:
+                    payment_msg += f"📱 **UPI ID:** `{upi_id}`\n"
+                if paytm_num:
+                    payment_msg += f"💳 **PayTm:** `{paytm_num}`\n"
+                payment_msg += "\nQR bhej du? Pay karo baby 😘"
+                
+                if qr_path and os.path.exists(qr_path):
+                    try:
+                        await client.send_file(chat_id, qr_path, caption=payment_msg)
+                    except:
+                        await event.respond(payment_msg)
+                else:
+                    await event.respond(payment_msg)
+                
+                # Don't send AI reply now
+                matched = True
+                reply = None
+            
+            # ===== STEP 3: AI REPLY =====
             if not matched:
-                logger.info(f"🤖 AI for: {msg_text[:40]}...")
                 try:
                     ai_bot = get_ai_bot()
                     if ai_bot:
                         reply = ai_bot.get_reply(sender_id, msg_text, count)
                     
                     if not reply or len(reply.strip()) < 2:
-                        logger.warning("⚠️ AI failed, payment fallback...")
-                        reply = get_minimal_fallback(msg_text)
-                    else:
-                        await asyncio.sleep(0.3)
-                        
+                        if is_payment:
+                            reply = get_payment_fallback()
+                        elif is_service:
+                            reply = get_service_fallback()
+                        else:
+                            reply = get_normal_fallback()
+                    
                 except Exception as ai_err:
                     logger.error(f"❌ AI error: {ai_err}")
-                    reply = get_minimal_fallback(msg_text)
+                    if is_payment:
+                        reply = get_payment_fallback()
+                    elif is_service:
+                        reply = get_service_fallback()
+                    else:
+                        reply = get_normal_fallback()
             
-            # ===== STEP 3: SEND REPLY =====
-            await event.respond(reply)
+            # ===== STEP 4: SEND REPLY =====
+            if reply:
+                await event.respond(reply)
+                await asyncio.sleep(0.2)
             
-            # ===== PRICE LIST ON 2nd MESSAGE (fast) =====
-            if count == 1:
-                await asyncio.sleep(0.3)
+            # ===== PRICE LIST ON FIRST REPLY ITSELF (fast) =====
+            if count == 0:
+                await asyncio.sleep(0.5)
                 try:
                     price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
                     price_image = get_setting('price_list_image', '')
@@ -238,7 +296,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                         await client.send_file(chat_id, price_image, caption=price_text)
                     else:
                         await event.respond(price_text)
-                    logger.info(f"✅ Price list sent to {sender_id}")
+                    logger.info(f"✅ Price list sent to {sender_id} on first message")
                 except Exception as e:
                     logger.error(f"Price list error: {e}")
             
@@ -247,7 +305,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
     except Exception as e:
         logger.error(f"AI mode error: {e}")
         try:
-            await event.respond("Payment karo baby, phir service milega 😘")
+            await event.respond("Kya hua baby? Batao na 😊")
         except:
             pass
 
@@ -342,7 +400,7 @@ async def handle_keyword_mode(event, client, acc_info):
     except Exception as e:
         logger.error(f"Keyword mode error: {e}")
 
-# ===== ADMIN BOT HANDLERS (Full admin panel) =====
+# ===== ADMIN BOT HANDLERS =====
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     connected = len(accounts)
     model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
@@ -720,7 +778,7 @@ async def run_bot():
     asyncio.create_task(keep_accounts_alive())
     logger.info("✅ Keep-alive started")
     
-    # Cleanup webhook
+    # Cleanup
     for attempt in range(3):
         try:
             bot = Bot(token=BOT_TOKEN)

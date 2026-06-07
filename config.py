@@ -1,5 +1,5 @@
 # config.py
-BOT_TOKEN = "8863662845:AAHv5olon6S3Kv4Kic0yWuK8wGKAtm2k3xs"
+BOT_TOKEN = "8863662845:AAEltglSI7w6upTDpELshj5v_diQoNzeMY0"
 ADMIN_ID = 8001816524
 
 # Open Router API

@@ -1,0 +1,273 @@
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if data == "main_menu":
+        await show_main_menu(update, context)
+        return
+    
+    elif data == "add_account_how":
+        await query.edit_message_text(
+            "📱 **Add Account** 📱\n\n"
+            "Command চালিয়ে String নাও:\n\n"
+            "```\npip install telethon && python -c \"from telethon.sync import TelegramClient; from telethon.sessions import StringSession; c = TelegramClient(StringSession(), 37362415, '88f99afa3b9a81adce62267b701e7b9f'); c.start(); print(c.session.save())\"\n```\n\nসেটা এখানে paste করো!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
+    
+    elif data == "menu_accounts":
+        if not accounts:
+            await query.edit_message_text("👥 **No accounts!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ Add", callback_data="add_account_how")],[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+            return
+        msg = f"👥 **Total: {len(accounts)}**\n\n"
+        kb = []
+        for i, acc in enumerate(accounts):
+            s = "🟢" if acc.get('enabled', True) else "🔴"
+            mode = "🤖" if acc.get('mode') == 'ai' else "📋"
+            name = acc.get('name', f"User{acc['id']}")
+            msg += f"{s} #{i+1} {name} [{mode}]\n"
+            kb.append([InlineKeyboardButton(f"{'🔴' if acc.get('enabled', True) else '🟢'} Toggle #{i+1}", callback_data=f"tog_{i}")])
+            kb.append([InlineKeyboardButton(f"🗑 Delete #{i+1}", callback_data=f"delacc_{i}")])
+        kb.append([InlineKeyboardButton("➕ Add", callback_data="add_account_how")])
+        kb.append([InlineKeyboardButton("🔙", callback_data="main_menu")])
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
+    
+    elif data.startswith("tog_"):
+        idx = int(data.split("_")[1])
+        if 0 <= idx < len(accounts):
+            accounts[idx]['enabled'] = not accounts[idx].get('enabled', True)
+            _save_sessions()
+        await button_callback(update, context)
+    
+    # ===== DELETE ACCOUNT START =====
+    elif data.startswith("delacc_"):
+        idx = int(data.split("_")[1])
+        if 0 <= idx < len(accounts):
+            acc = accounts[idx]
+            kb = [
+                [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_del_{idx}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="menu_accounts")]
+            ]
+            await query.edit_message_text(
+                f"⚠️ **Confirm Delete** ⚠️\n\n"
+                f"👤 **{acc.get('name', 'Unknown')}**\n"
+                f"🆔 `{acc['id']}`\n\n"
+                f"নিশ্চিত?",
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode='Markdown'
+            )
+    
+    elif data.startswith("confirm_del_"):
+        idx = int(data.split("_")[2])
+        if 0 <= idx < len(accounts):
+            acc = accounts.pop(idx)
+            try:
+                await acc['client'].disconnect()
+                logger.info(f"🔌 Disconnected client: {acc.get('name', 'Unknown')}")
+            except Exception as e:
+                logger.warning(f"Disconnect error: {e}")
+            _save_sessions()
+            logger.info(f"🗑 Account deleted: {acc.get('name', 'Unknown')} (ID: {acc['id']})")
+            await query.edit_message_text(
+                f"✅ **Account Deleted!** 🎉\n\n"
+                f"👤 `{acc.get('name', 'Unknown')}`\n"
+                f"🆔 `{acc['id']}`",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Accounts", callback_data="menu_accounts")]]),
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text("❌ Invalid index!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+    # ===== DELETE ACCOUNT END =====
+    
+    elif data == "menu_ai":
+        ai_count = sum(1 for a in accounts if a.get('mode') == 'ai')
+        model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
+        msg = f"🤖 **AI Mode**\n\nAI: {ai_count}/{len(accounts)}\nModel: `{model}`"
+        kb = [
+            [InlineKeyboardButton("🟢 Start AI", callback_data="ai_start")],
+            [InlineKeyboardButton("🔴 Keyword Mode", callback_data="ai_stop")],
+            [InlineKeyboardButton("⚡ Change Model", callback_data="change_model")],
+            [InlineKeyboardButton("🔄 Reset Counters", callback_data="reset_counters")],
+            [InlineKeyboardButton("🔙", callback_data="main_menu")]
+        ]
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    
+    elif data == "ai_start":
+        for acc in accounts:
+            acc['mode'] = 'ai'
+        await query.edit_message_text("✅ **AI Mode Started!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_ai")]]))
+    
+    elif data == "ai_stop":
+        for acc in accounts:
+            acc['mode'] = 'keyword'
+        await query.edit_message_text("✅ **Keyword Mode!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+    
+    elif data == "reset_counters":
+        customer_message_count.clear()
+        await query.edit_message_text("✅ Counters reset!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_ai")]]))
+    
+    elif data == "change_model":
+        kb = [
+            [InlineKeyboardButton("🟢 GPT-4o Mini", callback_data="model_openai/gpt-4o-mini")],
+            [InlineKeyboardButton("🔵 GPT-4o", callback_data="model_openai/gpt-4o")],
+            [InlineKeyboardButton("🟣 Gemini 2.0 Flash", callback_data="model_google/gemini-2.0-flash-exp")],
+            [InlineKeyboardButton("🟠 Llama 3.3 70B", callback_data="model_meta-llama/llama-3.3-70b-instruct")],
+            [InlineKeyboardButton("🔙", callback_data="menu_ai")]
+        ]
+        await query.edit_message_text("⚡ **Select Model**", reply_markup=InlineKeyboardMarkup(kb))
+    
+    elif data.startswith("model_"):
+        model = data.replace("model_", "")
+        set_setting('openrouter_model', model)
+        await query.edit_message_text(f"✅ Model: `{model}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_ai")]]), parse_mode='Markdown')
+    
+    elif data == "menu_payment":
+        upi = get_setting('upi_id', 'Not set')
+        paytm = get_setting('paytm_num', 'Not set')
+        has_qr = os.path.exists(get_setting('qr_code_path', '')) if get_setting('qr_code_path', '') else False
+        msg = f"💰 **PAYMENT**\n\n📱 UPI: `{upi}`\n💳 PayTm: `{paytm}`\n🖼️ QR: {'✅' if has_qr else '❌'}"
+        kb = [
+            [InlineKeyboardButton("📱 Set UPI", callback_data="set_upi")],
+            [InlineKeyboardButton("💳 Set PayTm", callback_data="set_paytm")],
+            [InlineKeyboardButton("🖼️ Upload QR", callback_data="upload_qr")],
+            [InlineKeyboardButton("💰 Edit Price", callback_data="edit_prices")],
+            [InlineKeyboardButton("🖼️ Price Image", callback_data="upload_price_image")],
+            [InlineKeyboardButton("🔙", callback_data="main_menu")]
+        ]
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    
+    elif data == "set_upi":
+        context.user_data['awaiting'] = 'upi_id'
+        await query.edit_message_text("📝 **UPI ID পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_payment")]]))
+    elif data == "set_paytm":
+        context.user_data['awaiting'] = 'paytm_num'
+        await query.edit_message_text("💳 **PayTm Number পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_payment")]]))
+    elif data == "upload_qr":
+        context.user_data['awaiting'] = 'qr_code'
+        await query.edit_message_text("🖼️ **QR Photo পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_payment")]]))
+    elif data == "edit_prices":
+        context.user_data['awaiting'] = 'prices'
+        current = get_setting('price_list_text', DEFAULT_PRICE_LIST)
+        await query.edit_message_text(f"💰 **Current:**\n{current}\n\n**New price text পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_payment")]]), parse_mode='Markdown')
+    elif data == "upload_price_image":
+        context.user_data['awaiting'] = 'price_image'
+        await query.edit_message_text("🖼️ **Price list photo পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_payment")]]))
+    
+    elif data == "menu_replies":
+        replies = get_all_replies()
+        if not replies:
+            await query.edit_message_text("📭 No replies!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+            return
+        page = int(context.user_data.get('reply_page', 0))
+        per_page = 5
+        total = max(1, (len(replies) + per_page - 1) // per_page)
+        start = page * per_page
+        end = start + per_page
+        page_list = replies[start:end]
+        msg = f"📋 **Page {page+1}/{total}**\n\n"
+        for r in page_list:
+            rid, kw, rt, tp = r
+            e = "🔑" if tp == "exact" else "🔍"
+            msg += f"{e} ID:{rid} `{kw[:20]}`\n  ➜ {rt[:35]}...\n\n"
+        kb = []
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️", callback_data=f"rp_{page-1}"))
+        if page < total - 1:
+            nav.append(InlineKeyboardButton("▶️", callback_data=f"rp_{page+1}"))
+        if nav:
+            kb.append(nav)
+        kb.append([InlineKeyboardButton("🔙", callback_data="main_menu")])
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
+    
+    elif data.startswith("rp_"):
+        context.user_data['reply_page'] = int(data.split("_")[1])
+        await button_callback(update, context)
+    
+    elif data == "add_reply_keyword":
+        context.user_data['awaiting'] = 'keyword'
+        await query.edit_message_text("➕ **Keyword পাঠাও:**\n\nযেমন: `price`, `kaha karu`, `scan`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+    
+    elif data == "reply_type_exact":
+        context.user_data['reply_type'] = 'exact'
+        context.user_data['awaiting'] = 'reply_text'
+        await query.edit_message_text("➕ **Reply text পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+    
+    elif data == "reply_type_contains":
+        context.user_data['reply_type'] = 'contains'
+        context.user_data['awaiting'] = 'reply_text'
+        await query.edit_message_text("➕ **Reply text পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+    
+    elif data == "menu_del_reply":
+        replies = get_all_replies()
+        if not replies:
+            await query.edit_message_text("📭 No replies!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+            return
+        kb = [[InlineKeyboardButton(f"🗑 ID:{r[0]} {r[1][:15]}", callback_data=f"cd_{r[0]}")] for r in replies[:10]]
+        kb.append([InlineKeyboardButton("🔙", callback_data="main_menu")])
+        await query.edit_message_text("🗑 **Select to delete:**", reply_markup=InlineKeyboardMarkup(kb))
+    
+    elif data.startswith("cd_"):
+        rid = int(data.split("_")[1])
+        await query.edit_message_text(f"⚠️ Delete ID {rid}?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes", callback_data=f"dd_{rid}")],[InlineKeyboardButton("❌ No", callback_data="menu_del_reply")]]))
+    
+    elif data.startswith("dd_"):
+        rid = int(data.split("_")[1])
+        status = "✅ Deleted!" if delete_reply(rid) else "❌ Not found!"
+        await query.edit_message_text(status, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+    
+    elif data == "menu_settings":
+        w = '✅' if get_setting('welcome_enabled','1')=='1' else '❌'
+        bp = '✅' if get_setting('block_photo_enabled','1')=='1' else '❌'
+        t = '✅' if get_setting('typing_enabled','1')=='1' else '❌'
+        tt = int(get_setting('typing_duration','3'))
+        dr = '✅' if get_setting('default_reply_enabled','0')=='1' else '❌'
+        
+        kb = [
+            [InlineKeyboardButton(f"👋 Welcome {w}", callback_data="tw")],
+            [InlineKeyboardButton(f"📸 Block Photo {bp}", callback_data="tbp")],
+            [InlineKeyboardButton(f"⌨️ Typing {t} ({tt}s)", callback_data="stt")],
+            [InlineKeyboardButton(f"💬 Default {dr}", callback_data="tdr")],
+            [InlineKeyboardButton("🔙", callback_data="main_menu")]
+        ]
+        await query.edit_message_text("⚙️ **Settings**", reply_markup=InlineKeyboardMarkup(kb))
+    
+    elif data == "tw":
+        cur = get_setting('welcome_enabled','1')
+        set_setting('welcome_enabled', '0' if cur=='1' else '1')
+        await button_callback(update, context)
+    elif data == "tbp":
+        cur = get_setting('block_photo_enabled','1')
+        set_setting('block_photo_enabled', '0' if cur=='1' else '1')
+        await button_callback(update, context)
+    elif data == "stt":
+        kb = [
+            [InlineKeyboardButton("⏱️ 2s", callback_data="tt_2"), InlineKeyboardButton("⏱️ 3s", callback_data="tt_3"), InlineKeyboardButton("⏱️ 5s", callback_data="tt_5")],
+            [InlineKeyboardButton("⏱️ 7s", callback_data="tt_7"), InlineKeyboardButton("⏱️ 10s", callback_data="tt_10"), InlineKeyboardButton("⏱️ 15s", callback_data="tt_15")],
+            [InlineKeyboardButton("🔙", callback_data="menu_settings")]
+        ]
+        await query.edit_message_text("⏱️ **Typing Duration**", reply_markup=InlineKeyboardMarkup(kb))
+    elif data.startswith("tt_"):
+        set_setting('typing_duration', data.split("_")[1])
+        await query.edit_message_text(f"✅ Typing: {data.split('_')[1]}s", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_settings")]]))
+    elif data == "tdr":
+        cur = get_setting('default_reply_enabled','0')
+        set_setting('default_reply_enabled', '0' if cur=='1' else '1')
+        await button_callback(update, context)
+    
+    elif data == "menu_status":
+        model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
+        ai_active = sum(1 for a in accounts if a.get('mode')=='ai')
+        tt = int(get_setting('typing_duration','3'))
+        typing_st = '✅ On' if get_setting('typing_enabled','1')=='1' else '❌ Off'
+        bp_st = '✅ On' if get_setting('block_photo_enabled','1')=='1' else '❌ Off'
+        
+        accs = "\n".join([f"{'🟢' if a.get('enabled',True) else '🔴'} #{i+1} {a['name']} {'🤖' if a.get('mode')=='ai' else '📋'}" for i,a in enumerate(accounts)]) or "No accounts"
+        msg = f"📊 **STATUS**\n\n"
+        msg += f"👥 Accounts: {len(accounts)}\n{accs}\n\n"
+        msg += f"🤖 AI Mode: {ai_active}/{len(accounts)}\n"
+        msg += f"🧠 Model: `{model}`\n"
+        msg += f"📝 Replies: {get_reply_count()}\n"
+        msg += f"⌨️ Typing: {typing_st} | ⏱️ {tt}s\n"
+        msg += f"📸 Block Photo: {bp_st}"
+        
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')

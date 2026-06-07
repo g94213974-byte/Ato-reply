@@ -58,9 +58,9 @@ SERVICE_KEYWORDS = ['service', 'servic', 'survice', 'sarvice', 'lena hai', 'chah
 
 PAYMENT_KEYWORDS = ['pay', 'payment', 'qr', 'scan', 'upi', 'paytm', 'phonepe', 'gpay', 
                     'google pay', 'kaha', 'kaise', 'account', 'bank', 'send', 'bhejo',
-                    'screenshot', 'payment kar', 'pay karo', 'pay kaise', 'kaha pay',
-                    'kaise pay', 'method', 'transfer', 'rupees', 'rs', '₹', 'dham',
-                    'send karo', 'money', 'paise', 'payment method']
+                    'screenshot', 'payment kar', 'pay karo', 'kaise pay', 'method', 'transfer',
+                    'rupees', 'rs', '₹', 'dham', 'send karo', 'money', 'paise', 'payment method',
+                    'payment kaise', 'kaha karu']
 
 # Shruti AI bot instance
 shruti_bot = None
@@ -74,33 +74,6 @@ def get_ai_bot():
         except Exception as e:
             logger.error(f"❌ Failed to init AI bot: {e}")
     return shruti_bot
-
-# ===== FALLBACK REPLIES =====
-def get_normal_fallback():
-    replies = [
-        "Hello baby! Kaise ho? 😊",
-        "Hi baby! Kya kar rahe ho? 😘",
-        "Namaste baby! Aapka naam? 😊",
-        "Kya chahiye aapko? Batao na 😘"
-    ]
-    return random.choice(replies)
-
-def get_payment_fallback():
-    replies = [
-        "Payment karo baby, phir service milega 😘",
-        "UPI QR bhej du? Pay karo baby 😊",
-        "Pehle pay karo baby, phir baat karenge 😉",
-        "Payment screenshot bhejo baby, phir service milega 🔥"
-    ]
-    return random.choice(replies)
-
-def get_service_fallback():
-    replies = [
-        "Service chahiye? Price list bhej du? 😊",
-        "Demo ₹19, video call ₹49 se start. Batao baby 😘",
-        "Kya service lena chahte ho? Batao na 😊"
-    ]
-    return random.choice(replies)
 
 # ===== SESSION MANAGEMENT =====
 def _save_sessions():
@@ -180,7 +153,7 @@ def _register_handler(client, acc_info):
         except Exception as e:
             logger.error(f"Handler error: {e}")
 
-# ===== AI MODE =====
+# ===== AI MODE - FULLY MODIFIED AS PER REQUEST =====
 async def handle_ai_mode(event, client, acc_info, sender_id):
     try:
         msg_text = event.message.text or ""
@@ -231,7 +204,32 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                     matched = True
                     break
             
-            # ===== STEP 2: PAYMENT INFO (if user asks about payment) =====
+            # ===== STEP 2: if asked for free PIC =====
+            if not matched:
+                pic_keywords = ['pic', 'pics', 'picture', 'photo', 'image', 'nude pic', 'nude photo',
+                               'naked', 'xxx pic', 'sexy pic', 'dikhao', 'show', 'image', 'full nude',
+                               'nangi', 'nude image', 'boob', 'boobs', 'dikha']
+                if any(kw in msg_lower for kw in pic_keywords):
+                    price_image = get_setting('price_list_image', '')
+                    price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
+                    
+                    # Check if price list has pic price mentioned
+                    if 'pic' in price_text.lower() or 'image' in price_text.lower() or 'photo' in price_text.lower():
+                        reply = "Pic free nahi hai baby 😘 Price list mein sab hai, pehle payment karo phir maza lo 🔥"
+                    else:
+                        reply = "Pic free nahi hai baby 😘 Sirf VC available hai, payment karo full maja dungi 🔥"
+                    matched = True
+            
+            # ===== STEP 3: if asked for REAL MEET / REAL SEX =====
+            if not matched:
+                meet_keywords = ['real', 'meet', 'mil', 'real meet', 'real sex', 'real xxx', 'real life',
+                                'personal', 'real life meet', 'aao', 'aana', 'ghar', 'location', 'aaja',
+                                'real service', 'offline', 'direct', 'face to face']
+                if any(kw in msg_lower for kw in meet_keywords):
+                    reply = "Baby real meet nahi, only online service hai 😊 Payment karo, video call mein full maza lo 🔥"
+                    matched = True
+            
+            # ===== STEP 4: PAYMENT INFO (if user asks about payment) =====
             if not matched and is_payment:
                 logger.info(f"💰 Payment request from {sender_id}")
                 upi_id = get_setting('upi_id', '')
@@ -243,7 +241,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                     payment_msg += f"📱 **UPI ID:** `{upi_id}`\n"
                 if paytm_num:
                     payment_msg += f"💳 **PayTm:** `{paytm_num}`\n"
-                payment_msg += "\nQR bhej du? Pay karo baby 😘"
+                payment_msg += "\nPayment karo baby, phir dekhna maza aa jayega 😘🔥 Bahut cute hoon main, trust karo ❤️"
                 
                 if qr_path and os.path.exists(qr_path):
                     try:
@@ -253,40 +251,44 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                 else:
                     await event.respond(payment_msg)
                 
-                # Don't send AI reply now
                 matched = True
                 reply = None
             
-            # ===== STEP 3: AI REPLY =====
+            # ===== STEP 5: AI REPLY (specially crafted prompt) =====
             if not matched:
                 try:
                     ai_bot = get_ai_bot()
                     if ai_bot:
-                        reply = ai_bot.get_reply(sender_id, msg_text, count)
-                    
-                    if not reply or len(reply.strip()) < 2:
-                        if is_payment:
-                            reply = get_payment_fallback()
-                        elif is_service:
-                            reply = get_service_fallback()
+                        # NEW: Override system prompt via a special context
+                        # The AI bot's get_reply function internally uses a system prompt.
+                        # We'll send a modified message that forces the behavior.
+                        ai_reply = ai_bot.get_reply(sender_id, msg_text, count)
+                        
+                        # Check if AI reply has any unwanted patterns
+                        unwanted = ['what do you need', 'kya chahiye', 'kaise ho', 'how are you',
+                                   'kya kar rahe', 'kaise hain', 'aapka naam', 'namaste',
+                                   'what is your name', 'kaun ho', 'kon ho']
+                        
+                        if ai_reply and not any(w in ai_reply.lower() for w in unwanted):
+                            reply = ai_reply
                         else:
-                            reply = get_normal_fallback()
-                    
+                            # Force payment-oriented reply
+                            reply = None  # Will use fallback
+                
                 except Exception as ai_err:
                     logger.error(f"❌ AI error: {ai_err}")
-                    if is_payment:
-                        reply = get_payment_fallback()
-                    elif is_service:
-                        reply = get_service_fallback()
-                    else:
-                        reply = get_normal_fallback()
+                    reply = None
+                
+                # If AI didn't give good reply, use our own smart fallback
+                if not reply:
+                    reply = get_smart_reply(msg_lower, count)
             
-            # ===== STEP 4: SEND REPLY =====
+            # ===== STEP 6: SEND REPLY =====
             if reply:
                 await event.respond(reply)
                 await asyncio.sleep(0.2)
             
-            # ===== PRICE LIST ON FIRST REPLY ITSELF (fast) =====
+            # ===== PRICE LIST ON FIRST MESSAGE =====
             if count == 0:
                 await asyncio.sleep(0.5)
                 try:
@@ -297,6 +299,15 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                     else:
                         await event.respond(price_text)
                     logger.info(f"✅ Price list sent to {sender_id} on first message")
+                    
+                    # Also send payment push after price list
+                    await asyncio.sleep(1.5)
+                    payment_push = random.choice([
+                        "Payment karo baby, full maja dungi 😘🔥",
+                        "Price list dekh lo, phir payment karo ❤️",
+                        "Bahut cute hoon baby, payment karo na 😘"
+                    ])
+                    await event.respond(payment_push)
                 except Exception as e:
                     logger.error(f"Price list error: {e}")
             
@@ -305,9 +316,64 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
     except Exception as e:
         logger.error(f"AI mode error: {e}")
         try:
-            await event.respond("Kya hua baby? Batao na 😊")
+            await event.respond("Payment karo baby, phir baat karenge 😘")
         except:
             pass
+
+
+# ===== SMART REPLY GENERATOR =====
+def get_smart_reply(msg_lower, count):
+    """Generate cute, payment-pushing replies"""
+    
+    # Greetings
+    if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'hii', 'hy', 'hlo', 'helo']):
+        return random.choice([
+            "Hii baby 😘 Kitna time ka chahiye? 10 min ya 20 min? 🔥",
+            "Hello baby 😊 Aap service lene aaye na? Kitna minute chahiye? ❤️",
+            "Hii baby 😘 Direct batao, kitna time chahiye? Payment karo maza lo 🔥"
+        ])
+    
+    # Service inquiry
+    if any(w in msg_lower for w in ['service', 'survice', 'chahiye', 'lena']):
+        return random.choice([
+            "Haan baby, service hai 😘 Kitna time chahiye aapko? 10 min ya 20 min? 🔥",
+            "Bilkul baby 😊 Batao kitna minute chahiye? Payment karo full maja dungi ❤️",
+            "Service available hai baby 😘 Pehle payment karo, phir dekhna maza 😉🔥"
+        ])
+    
+    # Price inquiry
+    if any(w in msg_lower for w in ['price', 'rate', 'kitna', 'cost', 'dam', 'mull']):
+        return random.choice([
+            "Price list bhej di baby 😘 Dekh lo phir payment karo na ❤️",
+            "Price list upar hai baby 😊 Kitna time lena chahoge? 🔥",
+            "Upar price list hai baby 😘 Payment karo, main wait kar rahi hoon ❤️"
+        ])
+    
+    # Time-related
+    if any(w in msg_lower for w in ['time', 'min', 'minute', '10', '20', 'kitna time']):
+        return random.choice([
+            "Jitna time chahiye baby 😘 Pehle payment karo, phir full time dungi 🔥",
+            "10 min ya 20 min jo tum chaho 😊 Payment karo na baby ❤️",
+            "Jitna chaho utna time 😘 Lekin pehle payment karo, trust karo bahut cute hoon 🔥"
+        ])
+    
+    # Default - always push payment
+    if count <= 2:
+        return random.choice([
+            "Payment karo baby, full maja dungi 😘🔥 Bahut cute hoon main, trust karo ❤️",
+            "Pehle payment karo na baby 😊 Phir dekhna kitna maza aayega 🔥",
+            "Kitna time chahiye baby? Payment karo, main ready hoon 😘❤️",
+            "Payment karo baby 😘 Bahut pyar se baat karungi, full enjoy karoge 🔥",
+            "Aajao baby, payment karo 😊 Main wait kar rahi hoon tumhare liye ❤️🔥"
+        ])
+    else:
+        return random.choice([
+            "Abhi bhi payment nahi kiya? 😢 Karo na baby, bahut maza ayega 🔥",
+            "Payment karo na baby 😘 Main bahut cute hoon, trust karo ❤️",
+            "Still waiting baby 😊 Payment karo, phir dekho maza 🔥",
+            "Kyun nahi kar rahe payment? 😢 Karo na, aapko pachtawa nahi hoga ❤️"
+        ])
+
 
 # ===== PAYMENT SCREENSHOT HANDLER =====
 async def handle_payment_screenshot(event, client, sender_id):

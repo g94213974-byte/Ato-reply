@@ -38,7 +38,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _save_sessions()
         await button_callback(update, context)
     
-    # ===== DELETE ACCOUNT (COMPLETE) =====
+    # ===== DELETE ACCOUNT START =====
     elif data.startswith("delacc_"):
         idx = int(data.split("_")[1])
         if 0 <= idx < len(accounts):
@@ -55,8 +55,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode='Markdown'
             )
-        else:
-            await query.edit_message_text("❌ Invalid account!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_accounts")]]))
     
     elif data.startswith("confirm_del_"):
         idx = int(data.split("_")[2])

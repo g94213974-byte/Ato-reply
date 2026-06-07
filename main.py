@@ -6,11 +6,12 @@ import random
 import shutil
 import signal
 import subprocess
+import httpx
 from threading import Thread
 from time import sleep
 
 from flask import Flask, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Application, ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 from telethon import TelegramClient, events
@@ -66,9 +67,8 @@ def get_ai_bot():
             logger.error(f"❌ Failed to init AI bot: {e}")
     return shruti_bot
 
-# ===== AI FAIL HOLE SHUDHU SIMPLE REPLY =====
+# ===== MINIMAL FALLBACK - ONLY WHEN AI FAILS =====
 def get_minimal_fallback(msg_text):
-    """Only used when AI completely fails - simple, no flirty pre-built"""
     simple_replies = [
         "Haan baby, kya bolna chahte ho?",
         "Baby, thoda clearly batao na.",
@@ -181,7 +181,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         except:
             pass
         
-        # Natural delay
+        # Natural typing delay
         await asyncio.sleep(random.uniform(0.5, 1.5))
         
         async with client.action(chat_id, "typing"):
@@ -190,7 +190,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
             matched = False
             reply = None
             
-            # ===== STEP 1: ONLY USER-ADDED CUSTOM REPLIES =====
+            # ===== STEP 1: ONLY USER ADDED CUSTOM REPLIES =====
             for rid, keyword, reply_text, rtype in replies:
                 kw = keyword.lower().strip()
                 if rtype == "exact" and msg_lower == kw:
@@ -204,27 +204,25 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                     logger.info(f"✅ Custom contains match: {kw}")
                     break
             
-            # ===== STEP 2: AI REPLY (ONLY if NO custom match) =====
+            # ===== STEP 2: AI REPLY (only if no custom match) =====
             if not matched:
-                logger.info(f"🤖 AI replying to: {msg_text[:50]}...")
+                logger.info(f"🤖 Calling AI for: {msg_text[:50]}...")
                 try:
                     ai_bot = get_ai_bot()
                     if ai_bot:
                         reply = ai_bot.get_reply(sender_id, msg_text, count)
                     else:
-                        reply = get_minimal_fallback(msg_text)
+                        reply = None
                     
-                    # AI fail check
                     if not reply or len(reply.strip()) < 2:
-                        logger.warning("⚠️ AI returned empty, using minimal fallback...")
+                        logger.warning("⚠️ AI failed, using minimal fallback...")
                         reply = get_minimal_fallback(msg_text)
                     else:
-                        # AI success - typing delay
                         typing_time = min(len(reply) * 0.02, 2.0)
                         await asyncio.sleep(typing_time)
-                    
+                        
                 except Exception as ai_err:
-                    logger.error(f"❌ AI error: {ai_err}")
+                    logger.error(f"❌ AI exception: {ai_err}")
                     reply = get_minimal_fallback(msg_text)
             
             # ===== STEP 3: SEND REPLY =====
@@ -294,7 +292,6 @@ async def handle_keyword_mode(event, client, acc_info):
         sender = await event.get_sender()
         sender_id = sender.id
         
-        # Photo block check
         if event.message.photo or (event.message.media and isinstance(event.message.media, MessageMediaPhoto)):
             if get_setting('block_photo_enabled', '1') == '1':
                 try:
@@ -518,7 +515,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "ai_start":
         for acc in accounts:
             acc['mode'] = 'ai'
-        await query.edit_message_text("✅ **AI Mode Started!** 🥰\n\nCustom Reply → AI",
+        await query.edit_message_text("✅ **AI Mode Started!**",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_ai")]]))
     
     elif data == "ai_stop":
@@ -715,40 +712,34 @@ async def run_bot():
     init_db()
     logger.info("✅ Database ready")
     
-    # Initialize AI bot
     get_ai_bot()
     logger.info("✅ AI Bot initialized")
     
     await start_all_accounts()
-    
-    # Start keep-alive
     asyncio.create_task(keep_accounts_alive())
     logger.info("✅ Keep-alive started")
     
-    # ===== CONFLICT FIX: Force clear all updates =====
-    from telegram import Bot
-    bot = Bot(token=BOT_TOKEN)
-    
+    # ===== FORCE CLEANUP - Kill any existing polling =====
     for attempt in range(3):
         try:
+            bot = Bot(token=BOT_TOKEN)
             await bot.delete_webhook(drop_pending_updates=True)
             await asyncio.sleep(2)
-            updates = await bot.get_updates(offset=-1, timeout=5)
-            logger.info(f"✅ Webhook deleted and updates cleared (attempt {attempt+1})")
+            try:
+                updates = await bot.get_updates(offset=-1, timeout=3)
+            except:
+                pass
+            await asyncio.sleep(1)
+            logger.info(f"✅ Cleanup attempt {attempt+1} done")
             break
         except Exception as e:
-            logger.warning(f"⚠️ Cleanup attempt {attempt+1}: {e}")
+            logger.warning(f"⚠️ Cleanup {attempt+1}: {e}")
             await asyncio.sleep(3)
     
-    # Setup bot with ApplicationBuilder
+    # Setup bot
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
-        .connect_timeout(30)
-        .read_timeout(30)
-        .write_timeout(30)
-        .pool_timeout(30)
-        .get_updates_read_timeout(30)
         .build()
     )
     
@@ -759,23 +750,16 @@ async def run_bot():
     await app.initialize()
     await app.start()
     
-    # Start polling
     try:
         await app.updater.start_polling(
             drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"],
-            poll_interval=0.5,
-            timeout=30
+            allowed_updates=["message", "callback_query"]
         )
-        logger.info("✅ Bot polling started successfully!")
+        logger.info("✅ Bot polling started!")
     except Exception as e:
-        logger.error(f"❌ Polling start error: {e}")
-        await asyncio.sleep(3)
-        try:
-            await app.updater.start_polling(drop_pending_updates=True)
-            logger.info("✅ Bot polling started on retry!")
-        except Exception as e2:
-            logger.error(f"❌ Polling retry failed: {e2}")
+        logger.error(f"❌ Polling error: {e}")
+        await asyncio.sleep(5)
+        await app.updater.start_polling(drop_pending_updates=True)
     
     try:
         await asyncio.Event().wait()
@@ -788,10 +772,11 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 def run_main():
-    # ===== FORCE KILL OLD INSTANCES =====
+    # ===== KILL OLD INSTANCES =====
     try:
         current_pid = os.getpid()
         result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+        killed = 0
         for line in result.stdout.split('\n'):
             if 'python' in line and 'main.py' in line:
                 parts = line.split()
@@ -800,28 +785,28 @@ def run_main():
                         pid = int(parts[1])
                         if pid != current_pid:
                             os.kill(pid, signal.SIGKILL)
-                            logger.warning(f"🔪 Killed old process: {pid}")
-                    except (ValueError, ProcessLookupError):
+                            killed += 1
+                    except:
                         pass
-        sleep(3)
+        if killed > 0:
+            logger.info(f"🔪 Killed {killed} old instance(s)")
+            sleep(5)
     except Exception as e:
-        logger.warning(f"Kill old instances error: {e}")
+        logger.warning(f"Kill error: {e}")
     
     # PID file
     with open("bot.pid", "w") as f:
         f.write(str(os.getpid()))
     
-    # Flask thread
+    # Flask
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask started")
     sleep(2)
     
-    # Run bot
+    # Bot
     try:
         asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped by keyboard")
     except Exception as e:
         logger.error(f"❌ Bot error: {e}", exc_info=True)
     finally:

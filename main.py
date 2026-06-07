@@ -12,6 +12,7 @@ from time import sleep
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Application, ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.error import Conflict
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -61,6 +62,11 @@ PAYMENT_KEYWORDS = ['pay', 'payment', 'qr', 'scan', 'upi', 'paytm', 'phonepe', '
                     'screenshot', 'payment kar', 'pay karo', 'kaise pay', 'method', 'transfer',
                     'rupees', 'rs', '₹', 'dham', 'send karo', 'money', 'paise', 'payment method',
                     'payment kaise', 'kaha karu']
+
+PHOTO_BLOCK_KEYWORDS = ['pic', 'pics', 'picture', 'photo', 'image', 'nude pic', 'nude photo',
+                        'naked', 'xxx pic', 'sexy pic', 'dikhao', 'show', 'full nude',
+                        'nangi', 'boob', 'boobs', 'dikha', 'mms', 'xnxx', 'xxx',
+                        'nude video', 'sex video', 'blue film', 'bf', 'xxx video']
 
 # Shruti AI bot instance
 shruti_bot = None
@@ -169,23 +175,72 @@ async def do_typing(client, chat_id):
         logger.error(f"Typing error: {e}")
         await asyncio.sleep(0.3)
 
+# ===== SEND PAYMENT QR HELPER =====
+async def send_payment_info(client, chat_id, event=None):
+    """Send payment details with QR code"""
+    try:
+        upi_id = get_setting('upi_id', '')
+        paytm_num = get_setting('paytm_num', '')
+        qr_path = get_setting('qr_code_path', '')
+        
+        payment_msg = "**💰 Payment Details 💰**\n\n"
+        if upi_id:
+            payment_msg += f"📱 **UPI ID:** `{upi_id}`\n"
+        if paytm_num:
+            payment_msg += f"💳 **PayTm:** `{paytm_num}`\n"
+        payment_msg += "\n**Scan karo baby, payment karo 😘🔥**"
+        
+        if qr_path and os.path.exists(qr_path):
+            try:
+                await client.send_file(chat_id, qr_path, caption=payment_msg)
+                logger.info(f"✅ QR sent to {chat_id}")
+            except Exception as e:
+                logger.error(f"QR send error: {e}")
+                await event.respond(payment_msg)
+        else:
+            await event.respond(payment_msg)
+            await event.respond("⚠️ **QR code set nahi hai! Admin se set karwao**")
+    except Exception as e:
+        logger.error(f"Payment info error: {e}")
+
+# ===== PHOTO BLOCK HANDLER =====
+async def handle_photo_block(event, client, sender_id):
+    """Block user who sends photo + delete photo"""
+    try:
+        logger.info(f"📸 Blocking photo from {sender_id}")
+        
+        # Block the user
+        await client(BlockRequest(id=sender_id))
+        logger.info(f"✅ User {sender_id} blocked")
+        
+        # Delete the photo message
+        try:
+            peer = await event.get_input_chat()
+            await client.delete_messages(peer, [event.message.id], revoke=True)
+            logger.info(f"✅ Photo deleted from {sender_id}")
+        except Exception as e:
+            logger.error(f"Delete photo error: {e}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Photo block error: {e}")
+        return False
+
 # ===== AI MODE =====
 async def handle_ai_mode(event, client, acc_info, sender_id):
     try:
         msg_text = event.message.text or ""
         chat_id = event.chat_id
         
-        # ===== STICKER RECEIVED → ONLY PRICE LIST =====
+        # ===== STICKER HANDLER =====
         if event.message.sticker:
-            logger.info(f"🎴 Sticker received from {sender_id} → sending price list")
+            logger.info(f"🎴 Sticker from {sender_id} → price list")
             
             if sender_id not in customer_message_count:
                 customer_message_count[sender_id] = 0
             
-            # Typing
             await do_typing(client, chat_id)
             
-            # Only price list, no greeting sticker
             try:
                 price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
                 price_image = get_setting('price_list_image', '')
@@ -193,20 +248,25 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                     await client.send_file(chat_id, price_image, caption=price_text)
                 else:
                     await event.respond(price_text)
-                logger.info(f"✅ Price list sent for sticker from {sender_id}")
-            except Exception as e:
-                logger.error(f"Price list error: {e}")
+            except:
+                pass
             
             customer_message_count[sender_id] += 1
             return
         
-        # ===== TEXT MESSAGE =====
-        if not msg_text.strip():
+        # ===== PHOTO/MEDIA HANDLER (BLOCK) =====
+        if event.message.photo or (event.message.document and event.message.document.mime_type and 'image' in event.message.document.mime_type):
+            block_enabled = get_setting('block_photo_enabled', '1') == '1'
+            
+            if block_enabled:
+                await handle_photo_block(event, client, sender_id)
+            else:
+                # If block is disabled, treat as payment screenshot
+                await handle_payment_screenshot(event, client, sender_id)
             return
         
-        # Photo handle
-        if event.message.photo:
-            await handle_payment_screenshot(event, client, sender_id)
+        # ===== TEXT MESSAGE =====
+        if not msg_text.strip():
             return
         
         # Track message count
@@ -223,175 +283,145 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         
         msg_lower = msg_text.lower().strip()
         
-        # ===== FIRST TEXT MESSAGE =====
-        if count == 0:
+        # ===== CUSTOM REPLIES CHECK (FIRST) =====
+        replies = get_all_replies()
+        custom_match = None
+        
+        for rid, keyword, reply_text, rtype in replies:
+            kw = keyword.lower().strip()
+            if rtype == "exact":
+                if msg_lower == kw:
+                    custom_match = reply_text
+                    logger.info(f"✅ Custom reply matched (exact): '{kw}' → '{reply_text[:30]}...'")
+                    break
+            elif rtype == "contains":
+                if kw in msg_lower:
+                    custom_match = reply_text
+                    logger.info(f"✅ Custom reply matched (contains): '{kw}' in '{msg_lower[:30]}...'")
+                    break
+        
+        if custom_match:
             await do_typing(client, chat_id)
-            
-            # Price list
-            try:
-                price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
-                await event.respond(price_text)
-            except:
-                pass
-            
-            # Short AI reply
-            await asyncio.sleep(0.5)
-            await do_typing(client, chat_id)
-            
-            try:
-                ai_bot = get_ai_bot()
-                reply = None
-                if ai_bot:
-                    reply = ai_bot.get_reply(sender_id, msg_text, count)
-                if not reply:
-                    reply = get_short_reply(msg_lower, count)
-            except:
-                reply = get_short_reply(msg_lower, count)
-            
-            if reply:
-                await event.respond(reply)
-            
+            await event.respond(custom_match)
             customer_message_count[sender_id] = count + 1
             return
         
-        # ===== SUBSEQUENT MESSAGES =====
-        await do_typing(client, chat_id)
+        # ===== PAYMENT KEYWORDS CHECK (kaha karu, kisme karu, kaise karu etc) =====
+        payment_question_keywords = ['kaha kar', 'kisme kar', 'kaise kar', 'kaha pay', 'kaise pay',
+                                     'kaha bhej', 'kaise bhej', 'method', 'scan', 'qr', 'upi id',
+                                     'kya hai', 'kaha hai', 'kaise', 'kaha', 'kisme']
         
-        replies = get_all_replies()
-        matched = False
-        reply = None
+        is_payment_question = any(kw in msg_lower for kw in payment_question_keywords)
         
-        is_service = any(kw in msg_lower for kw in SERVICE_KEYWORDS)
+        # Also check if it's a general payment query
         is_payment = any(kw in msg_lower for kw in PAYMENT_KEYWORDS)
         
-        # STEP 1: CUSTOM REPLIES
-        for rid, keyword, reply_text, rtype in replies:
-            kw = keyword.lower().strip()
-            if rtype == "exact" and msg_lower == kw:
-                reply = reply_text
-                matched = True
-                break
-            elif rtype == "contains" and kw in msg_lower:
-                reply = reply_text
-                matched = True
-                break
+        if is_payment_question or is_payment:
+            logger.info(f"💰 Payment query from {sender_id}: {msg_text[:40]}")
+            await do_typing(client, chat_id)
+            await send_payment_info(client, chat_id, event)
+            customer_message_count[sender_id] = count + 1
+            return
         
-        # STEP 2: FREE PIC
-        if not matched:
-            pic_keywords = ['pic', 'pics', 'picture', 'photo', 'image', 'nude pic', 'nude photo',
-                           'naked', 'xxx pic', 'sexy pic', 'dikhao', 'show', 'full nude',
-                           'nangi', 'boob', 'boobs', 'dikha']
-            if any(kw in msg_lower for kw in pic_keywords):
-                reply = "Pic free nahi baby 😘 Payment karo 🔥"
-                matched = True
+        # ===== PHOTO BLOCK KEYWORDS CHECK (pic, nude etc as TEXT) =====
+        if any(kw in msg_lower for kw in PHOTO_BLOCK_KEYWORDS):
+            await do_typing(client, chat_id)
+            await event.respond("Pic free nahi baby 😘 Payment karo, VC lo 🔥")
+            customer_message_count[sender_id] = count + 1
+            return
         
-        # STEP 3: REAL MEET
-        if not matched:
-            meet_keywords = ['real', 'meet', 'mil', 'real meet', 'real sex', 'real xxx',
-                            'aao', 'aana', 'ghar', 'location', 'aaja', 'offline', 'face to face']
-            if any(kw in msg_lower for kw in meet_keywords):
-                reply = "Only online service baby 😊 Payment karo 🔥"
-                matched = True
+        # ===== SERVICE KEYWORDS =====
+        is_service = any(kw in msg_lower for kw in SERVICE_KEYWORDS)
         
-        # STEP 4: PAYMENT INFO
-        if not matched and is_payment:
-            upi_id = get_setting('upi_id', '')
-            paytm_num = get_setting('paytm_num', '')
-            qr_path = get_setting('qr_code_path', '')
-            
-            payment_msg = "**💰 Payment 💰**\n\n"
-            if upi_id:
-                payment_msg += f"📱 UPI: `{upi_id}`\n"
-            if paytm_num:
-                payment_msg += f"💳 PayTm: `{paytm_num}`\n"
-            payment_msg += "\nPay karo baby 😘"
-            
-            if qr_path and os.path.exists(qr_path):
-                try:
-                    await client.send_file(chat_id, qr_path, caption=payment_msg)
-                except:
-                    await event.respond(payment_msg)
+        if is_service:
+            await do_typing(client, chat_id)
+            price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
+            price_image = get_setting('price_list_image', '')
+            if price_image and os.path.exists(price_image):
+                await client.send_file(chat_id, price_image, caption=price_text)
             else:
-                await event.respond(payment_msg)
+                await event.respond(price_text)
             
-            matched = True
+            await asyncio.sleep(0.5)
+            await event.respond(random.choice([
+                "Kitna time chahiye baby? 10 min ya 20? 😘",
+                "Batao kitna minute lena hai? 🔥",
+                "Kitna time ka chahiye? Pay karo maza lo 😘"
+            ]))
+            customer_message_count[sender_id] = count + 1
+            return
+        
+        # ===== REAL MEET CHECK =====
+        meet_keywords = ['real', 'meet', 'mil', 'real meet', 'aao', 'aana', 'ghar', 'location',
+                        'aaja', 'offline', 'face to face', 'real video', 'milna', 'live']
+        
+        if any(kw in msg_lower for kw in meet_keywords):
+            await do_typing(client, chat_id)
+            await event.respond("Only online service baby 😊 Pay karo 🔥")
+            customer_message_count[sender_id] = count + 1
+            return
+        
+        # ===== NORMAL REPLY =====
+        await do_typing(client, chat_id)
+        
+        try:
+            ai_bot = get_ai_bot()
             reply = None
-        
-        # STEP 5: AI / SHORT REPLY
-        if not matched:
-            try:
-                ai_bot = get_ai_bot()
-                if ai_bot:
-                    ai_reply = ai_bot.get_reply(sender_id, msg_text, count)
-                    if ai_reply:
-                        reply = ai_reply
-                    else:
-                        reply = get_short_reply(msg_lower, count)
-                else:
-                    reply = get_short_reply(msg_lower, count)
-            except:
+            if ai_bot:
+                reply = ai_bot.get_reply(sender_id, msg_text, count)
+            if not reply:
                 reply = get_short_reply(msg_lower, count)
+        except:
+            reply = get_short_reply(msg_lower, count)
         
-        # STEP 6: SEND REPLY
         if reply:
             await event.respond(reply)
+        
+        customer_message_count[sender_id] = count + 1
     
     except Exception as e:
-        logger.error(f"AI mode error: {e}")
+        logger.error(f"AI mode error: {e}", exc_info=True)
         try:
             await event.respond("Pay karo baby 😘")
         except:
             pass
 
-# ===== SHORT REPLY GENERATOR (8-10 WORDS) =====
+# ===== SHORT REPLY GENERATOR =====
 def get_short_reply(msg_lower, count):
-    """Always short, payment focused replies"""
+    """Short, payment focused replies"""
     
-    if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'hii', 'hy', 'hlo']):
+    if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'hii', 'hy', 'hlo', 'helo']):
         return random.choice([
             "Hi baby 😘 Kitna time chahiye? 🔥",
             "Hello baby 😊 Service lena hai? ❤️",
-            "Hii baby 😘 Payment karo na 🔥"
+            "Hii baby 😘 Pay karo na 🔥"
         ])
     
-    if any(w in msg_lower for w in ['service', 'survice', 'chahiye', 'lena']):
-        return random.choice([
-            "Haan baby 😘 Kitna minute chahiye? 🔥",
-            "Bilkul baby 😊 Payment karo maza lo ❤️",
-            "Service hai baby 😘 Pay karo 🔥"
-        ])
-    
-    if any(w in msg_lower for w in ['price', 'rate', 'kitna', 'cost']):
-        return random.choice([
-            "Price upar hai baby 😘 Pay karo ❤️",
-            "Dekh lo price baby 😊 Payment karo 🔥"
-        ])
-    
-    if any(w in msg_lower for w in ['time', 'min', 'minute', '10', '20', 'kitna time']):
-        return random.choice([
-            "Jitna chaho baby 😘 Pehle pay karo 🔥",
-            "10 min ya 20 min 😊 Payment karo ❤️"
-        ])
-    
-    # Always payment push
     return random.choice([
         "Pay karo baby, maza lo 😘🔥",
         "Payment karo na baby 😊",
-        "Pehle pay karo baby ❤️",
-        "Pay karo, phir baat 😘",
         "Kitna time chahiye baby? 🔥",
-        "Payment karo baby 😘",
-        "Pay karo na baby ❤️"
+        "Pay karo na baby ❤️",
+        "Pehle pay karo baby 😘",
+        "Batao kitna minute chahiye? 😘"
     ])
 
 # ===== PAYMENT SCREENSHOT HANDLER =====
 async def handle_payment_screenshot(event, client, sender_id):
     try:
-        photo = event.message.photo[-1]
+        if event.message.photo:
+            photo = event.message.photo[-1]
+        elif event.message.document:
+            photo = event.message.document
+        else:
+            return
+        
         os.makedirs('payment_screenshots', exist_ok=True)
         file_path = f"payment_screenshots/{sender_id}_{event.message.id}.jpg"
         await photo.download_async(file_path)
         customer_payment_photos[sender_id] = file_path
+        
+        sender_name = event.sender.first_name if event.sender else "Unknown"
         
         await event.respond(
             "🥰 **Payment screenshot received baby!** 🥰\n\n"
@@ -402,11 +432,11 @@ async def handle_payment_screenshot(event, client, sender_id):
         
         await client.send_message(
             ADMIN_ID,
-            f"🚨 **NEW PAYMENT SCREENSHOT!** 🚨\n\n"
-            f"👤 Customer: [{event.sender.first_name}](tg://user?id={sender_id})\n"
-            f"🆔 User ID: `{sender_id}`\n"
+            f"🚨 **NEW PAYMENT!** 🚨\n\n"
+            f"👤 Customer: [{sender_name}](tg://user?id={sender_id})\n"
+            f"🆔 ID: `{sender_id}`\n"
             f"💬 Messages: {customer_message_count.get(sender_id, 0)}\n\n"
-            f"🔴 **ADMIN PLEASE CHECK!** 🔴",
+            f"🔴 **ADMIN CHECK!** 🔴",
             parse_mode='Markdown'
         )
         await client.send_file(ADMIN_ID, file_path)
@@ -419,21 +449,16 @@ async def handle_payment_screenshot(event, client, sender_id):
 async def handle_keyword_mode(event, client, acc_info):
     try:
         msg_text = event.message.text or ""
-        if not msg_text:
+        chat_id = event.chat_id
+        
+        # Photo block for keyword mode too
+        if event.message.photo:
+            block_enabled = get_setting('block_photo_enabled', '1') == '1'
+            if block_enabled:
+                await handle_photo_block(event, client, event.sender.id)
             return
         
-        chat_id = event.chat_id
-        sender = await event.get_sender()
-        sender_id = sender.id
-        
-        if event.message.photo:
-            if get_setting('block_photo_enabled', '1') == '1':
-                try:
-                    await client(BlockRequest(id=sender_id))
-                    peer = await event.get_input_chat()
-                    await client.delete_messages(peer, [event.message.id], revoke=True)
-                except:
-                    pass
+        if not msg_text.strip():
             return
         
         try:
@@ -453,14 +478,21 @@ async def handle_keyword_mode(event, client, acc_info):
             if rtype == "exact" and msg_lower == kw:
                 matched = True
                 await event.respond(reply_text)
+                logger.info(f"✅ Keyword mode matched (exact): {kw}")
                 break
             elif rtype == "contains" and kw in msg_lower:
                 matched = True
                 await event.respond(reply_text)
+                logger.info(f"✅ Keyword mode matched (contains): {kw}")
                 break
         
         if not matched:
-            if get_setting('default_reply_enabled', '0') == '1':
+            # Check for payment question
+            payment_question_keywords = ['kaha kar', 'kisme kar', 'kaise kar', 'kaha pay', 'kaise pay',
+                                         'kaha bhej', 'kaise bhej', 'method', 'scan', 'qr', 'upi id']
+            if any(kw in msg_lower for kw in payment_question_keywords):
+                await send_payment_info(client, chat_id, event)
+            elif get_setting('default_reply_enabled', '0') == '1':
                 default_reply = get_setting('default_reply_text', 'Pay karo baby')
                 await event.respond(default_reply)
     except Exception as e:
@@ -727,7 +759,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "add_reply_keyword":
         context.user_data['awaiting'] = 'keyword'
-        await query.edit_message_text("➕ **Keyword পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+        await query.edit_message_text("➕ **Keyword পাঠাও:**\n\nযেমন: `price`, `kaha karu`, `scan`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
     
     elif data == "reply_type_exact":
         context.user_data['reply_type'] = 'exact'
@@ -771,7 +803,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(f"💬 Default {dr}", callback_data="tdr")],
             [InlineKeyboardButton("🔙", callback_data="main_menu")]
         ]
-        await query.edit_message_text("⚙️ **Settings**\n\nTyping Duration: ⏱️ ক্লিক করুন", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text("⚙️ **Settings**", reply_markup=InlineKeyboardMarkup(kb))
     
     elif data == "tw":
         cur = get_setting('welcome_enabled','1')
@@ -783,7 +815,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await button_callback(update, context)
     elif data == "tty":
         cur = get_setting('typing_enabled','1')
-        set_setting('typing_enabled', '0' if cur=='1' else '1')
+        # No, this is separate. Let's keep it.
         await button_callback(update, context)
     elif data == "stt":
         kb = [
@@ -791,7 +823,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⏱️ 7s", callback_data="tt_7"), InlineKeyboardButton("⏱️ 10s", callback_data="tt_10"), InlineKeyboardButton("⏱️ 15s", callback_data="tt_15")],
             [InlineKeyboardButton("🔙", callback_data="menu_settings")]
         ]
-        await query.edit_message_text("⏱️ **Typing Duration**\n\nকত সেকেন্ড typing দেখাবে?", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text("⏱️ **Typing Duration**", reply_markup=InlineKeyboardMarkup(kb))
     elif data.startswith("tt_"):
         set_setting('typing_duration', data.split("_")[1])
         await query.edit_message_text(f"✅ Typing: {data.split('_')[1]}s", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_settings")]]))
@@ -805,6 +837,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ai_active = sum(1 for a in accounts if a.get('mode')=='ai')
         tt = int(get_setting('typing_duration','3'))
         typing_st = '✅ On' if get_setting('typing_enabled','1')=='1' else '❌ Off'
+        bp_st = '✅ On' if get_setting('block_photo_enabled','1')=='1' else '❌ Off'
         
         accs = "\n".join([f"{'🟢' if a.get('enabled',True) else '🔴'} #{i+1} {a['name']} {'🤖' if a.get('mode')=='ai' else '📋'}" for i,a in enumerate(accounts)]) or "No accounts"
         msg = f"📊 **STATUS**\n\n"
@@ -812,7 +845,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"🤖 AI Mode: {ai_active}/{len(accounts)}\n"
         msg += f"🧠 Model: `{model}`\n"
         msg += f"📝 Replies: {get_reply_count()}\n"
-        msg += f"⌨️ Typing: {typing_st} | ⏱️ {tt}s"
+        msg += f"⌨️ Typing: {typing_st} | ⏱️ {tt}s\n"
+        msg += f"📸 Block Photo: {bp_st}"
         
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
 
@@ -851,21 +885,36 @@ async def run_bot():
     asyncio.create_task(keep_accounts_alive())
     logger.info("✅ Keep-alive started")
     
-    for attempt in range(3):
+    # Aggressive cleanup
+    for attempt in range(5):
         try:
             bot = Bot(token=BOT_TOKEN)
+            webhook_info = await bot.get_webhook_info()
+            if webhook_info.url:
+                logger.info(f"⚠️ Webhook found: {webhook_info.url}, deleting...")
+                await bot.delete_webhook(drop_pending_updates=True)
+                await asyncio.sleep(3)
+            
             await bot.delete_webhook(drop_pending_updates=True)
             await asyncio.sleep(2)
+            
             try:
-                updates = await bot.get_updates(offset=-1, timeout=3)
+                await bot.get_updates(offset=-1, timeout=1, allowed_updates=[])
+                await asyncio.sleep(1)
+                await bot.get_updates(offset=-1, timeout=1, allowed_updates=[])
             except:
                 pass
-            await asyncio.sleep(1)
-            logger.info(f"✅ Cleanup {attempt+1}")
+            
+            await asyncio.sleep(2)
+            logger.info(f"✅ Cleanup {attempt+1}/5")
             break
+        except Conflict as e:
+            logger.warning(f"⚠️ Conflict {attempt+1}: {e}")
+            if attempt < 4:
+                await asyncio.sleep((attempt + 1) * 5)
         except Exception as e:
             logger.warning(f"⚠️ Cleanup {attempt+1}: {e}")
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
     
     app = (
         ApplicationBuilder()
@@ -880,23 +929,37 @@ async def run_bot():
     await app.initialize()
     await app.start()
     
-    try:
-        await app.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"]
-        )
-        logger.info("✅ Bot polling started!")
-    except Exception as e:
-        logger.error(f"❌ Polling error: {e}")
-        await asyncio.sleep(5)
-        await app.updater.start_polling(drop_pending_updates=True)
+    for poll_attempt in range(3):
+        try:
+            await app.updater.start_polling(
+                drop_pending_updates=True,
+                allowed_updates=["message", "callback_query"],
+                poll_interval=0.5
+            )
+            logger.info("✅ Bot polling started!")
+            break
+        except Conflict as e:
+            logger.error(f"❌ Polling conflict {poll_attempt+1}: {e}")
+            if poll_attempt < 2:
+                await asyncio.sleep(10)
+            else:
+                raise
     
     try:
         await asyncio.Event().wait()
     finally:
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+        try:
+            await app.updater.stop()
+        except:
+            pass
+        try:
+            await app.stop()
+        except:
+            pass
+        try:
+            await app.shutdown()
+        except:
+            pass
 
 def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
@@ -917,11 +980,31 @@ def run_main():
                             killed += 1
                     except:
                         pass
+        
+        result2 = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+        for line in result2.stdout.split('\n'):
+            if 'getUpdates' in line or 'telegram' in line.lower():
+                parts = line.split()
+                if len(parts) > 1:
+                    try:
+                        pid = int(parts[1])
+                        if pid != current_pid:
+                            os.kill(pid, signal.SIGKILL)
+                            killed += 1
+                    except:
+                        pass
+        
         if killed > 0:
             logger.info(f"🔪 Killed {killed} old instance(s)")
             sleep(5)
     except Exception as e:
         logger.warning(f"Kill error: {e}")
+    
+    try:
+        if os.path.exists("bot.pid"):
+            os.remove("bot.pid")
+    except:
+        pass
     
     with open("bot.pid", "w") as f:
         f.write(str(os.getpid()))
@@ -929,15 +1012,18 @@ def run_main():
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask started")
-    sleep(2)
+    sleep(3)
     
     try:
         asyncio.run(run_bot())
     except Exception as e:
         logger.error(f"❌ Bot error: {e}", exc_info=True)
     finally:
-        if os.path.exists("bot.pid"):
-            os.remove("bot.pid")
+        try:
+            if os.path.exists("bot.pid"):
+                os.remove("bot.pid")
+        except:
+            pass
 
 if __name__ == "__main__":
     run_main()

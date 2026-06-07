@@ -651,7 +651,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mode = "🤖" if acc.get('mode') == 'ai' else "📋"
             name = acc.get('name', f"User{acc['id']}")
             msg += f"{s} #{i+1} {name} [{mode}]\n"
-            kb.append([InlineKeyboardButton(f"{'🔴' if acc.get('enabled', True) else '🟢'} #{i+1}", callback_data=f"tog_{i}")])
+            kb.append([InlineKeyboardButton(f"{'🔴' if acc.get('enabled', True) else '🟢'} Toggle #{i+1}", callback_data=f"tog_{i}")])
+            kb.append([InlineKeyboardButton(f"🗑 Delete #{i+1}", callback_data=f"delacc_{i}")])
         kb.append([InlineKeyboardButton("➕ Add", callback_data="add_account_how")])
         kb.append([InlineKeyboardButton("🔙", callback_data="main_menu")])
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
@@ -662,6 +663,48 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             accounts[idx]['enabled'] = not accounts[idx].get('enabled', True)
             _save_sessions()
         await button_callback(update, context)
+    
+    # ===== DELETE ACCOUNT =====
+    elif data.startswith("delacc_"):
+        idx = int(data.split("_")[1])
+        if 0 <= idx < len(accounts):
+            acc = accounts[idx]
+            kb = [
+                [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_del_{idx}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="menu_accounts")]
+            ]
+            await query.edit_message_text(
+                f"⚠️ **Confirm Delete** ⚠️\n\n"
+                f"👤 **{acc.get('name', 'Unknown')}**\n"
+                f"🆔 `{acc['id']}`\n\n"
+                f"নিশ্চিত?",
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text("❌ Invalid account!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_accounts")]]))
+    
+    elif data.startswith("confirm_del_"):
+        idx = int(data.split("_")[2])
+        if 0 <= idx < len(accounts):
+            acc = accounts.pop(idx)
+            try:
+                await acc['client'].disconnect()
+                logger.info(f"🔌 Disconnected client: {acc.get('name', 'Unknown')}")
+            except Exception as e:
+                logger.warning(f"Disconnect error: {e}")
+            _save_sessions()
+            logger.info(f"🗑 Account deleted: {acc.get('name', 'Unknown')} (ID: {acc['id']})")
+            await query.edit_message_text(
+                f"✅ **Account Deleted!** 🎉\n\n"
+                f"👤 `{acc.get('name', 'Unknown')}`\n"
+                f"🆔 `{acc['id']}`",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Accounts", callback_data="menu_accounts")]]),
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text("❌ Invalid index!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+    # ===== DELETE ACCOUNT END =====
     
     elif data == "menu_ai":
         ai_count = sum(1 for a in accounts if a.get('mode') == 'ai')

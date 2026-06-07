@@ -6,7 +6,6 @@ import random
 import shutil
 import signal
 import subprocess
-import httpx
 from threading import Thread
 from time import sleep
 
@@ -45,14 +44,13 @@ customer_message_count = {}
 customer_payment_photos = {}
 SESSION_FILE = "saved_sessions.json"
 
-DEFAULT_PRICE_LIST = """💕 **SHRUTI'S PRICE LIST** 💕
+DEFAULT_PRICE_LIST = """💰 **SHRUTI PRICE LIST** 💰
 
-📱 10 MIN VIDEO CALL → ₹49 🔥
-📱 20 MIN VIDEO CALL → ₹59 💋
-🎬 DEMO SHOW → ₹19 ONLY 😘
-**💰 HOW TO PAY 💰**
-Check my profile for payment details
-Then send me the SCREENSHOT here baby!"""
+🔥 10 MIN VC → ₹49
+🔥 20 MIN VC → ₹59
+🎬 DEMO (2 MIN FULL NUDE) → ₹19
+
+💳 **Pay karo baby, phir maza lo!** 😘"""
 
 # Shruti AI bot instance
 shruti_bot = None
@@ -67,15 +65,20 @@ def get_ai_bot():
             logger.error(f"❌ Failed to init AI bot: {e}")
     return shruti_bot
 
-# ===== MINIMAL FALLBACK - ONLY WHEN AI FAILS =====
+# ===== MINIMAL FALLBACK - Payment focused =====
 def get_minimal_fallback(msg_text):
-    simple_replies = [
-        "Haan baby, kya bolna chahte ho?",
-        "Baby, thoda clearly batao na.",
-        "Kya chahiye aapko? Batao na.",
-        "Baby, aap kya bolna chahte ho?"
+    """Only used when AI completely fails"""
+    payment_replies = [
+        "Payment karo baby, phir service milega 😘",
+        "Pehle pay karo baby, bad mein baat karenge 😉",
+        "Service chahiye? Toh payment karo pehle 😊",
+        "Baby, payment karo phir sab milega 🔥",
+        "Pay karo baby, main ready hoon aapke liye 😘",
+        "Demo chahiye? ₹19 pay karo baby",
+        "Video call 10min ₹49. Pay karo phir maza lo 😉",
+        "Payment screenshot bhejo baby, phir service milega"
     ]
-    return random.choice(simple_replies)
+    return random.choice(payment_replies)
 
 # ===== SESSION MANAGEMENT =====
 def _save_sessions():
@@ -155,7 +158,7 @@ def _register_handler(client, acc_info):
         except Exception as e:
             logger.error(f"Handler error: {e}")
 
-# ===== AI MODE - ONLY CUSTOM REPLIES + AI =====
+# ===== AI MODE - Payment Girl Character =====
 async def handle_ai_mode(event, client, acc_info, sender_id):
     try:
         msg_text = event.message.text or ""
@@ -181,8 +184,8 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         except:
             pass
         
-        # Natural typing delay
-        await asyncio.sleep(random.uniform(0.5, 1.5))
+        # Minimal delay - fast response
+        await asyncio.sleep(random.uniform(0.3, 0.8))
         
         async with client.action(chat_id, "typing"):
             msg_lower = msg_text.lower().strip()
@@ -190,7 +193,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
             matched = False
             reply = None
             
-            # ===== STEP 1: ONLY USER ADDED CUSTOM REPLIES =====
+            # ===== STEP 1: CUSTOM REPLIES =====
             for rid, keyword, reply_text, rtype in replies:
                 kw = keyword.lower().strip()
                 if rtype == "exact" and msg_lower == kw:
@@ -204,33 +207,30 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                     logger.info(f"✅ Custom contains match: {kw}")
                     break
             
-            # ===== STEP 2: AI REPLY (only if no custom match) =====
+            # ===== STEP 2: AI REPLY =====
             if not matched:
-                logger.info(f"🤖 Calling AI for: {msg_text[:50]}...")
+                logger.info(f"🤖 AI for: {msg_text[:40]}...")
                 try:
                     ai_bot = get_ai_bot()
                     if ai_bot:
                         reply = ai_bot.get_reply(sender_id, msg_text, count)
-                    else:
-                        reply = None
                     
                     if not reply or len(reply.strip()) < 2:
-                        logger.warning("⚠️ AI failed, using minimal fallback...")
+                        logger.warning("⚠️ AI failed, payment fallback...")
                         reply = get_minimal_fallback(msg_text)
                     else:
-                        typing_time = min(len(reply) * 0.02, 2.0)
-                        await asyncio.sleep(typing_time)
+                        await asyncio.sleep(0.3)
                         
                 except Exception as ai_err:
-                    logger.error(f"❌ AI exception: {ai_err}")
+                    logger.error(f"❌ AI error: {ai_err}")
                     reply = get_minimal_fallback(msg_text)
             
             # ===== STEP 3: SEND REPLY =====
             await event.respond(reply)
             
-            # Price list on 3rd message
-            if count == 2:
-                await asyncio.sleep(0.5)
+            # ===== PRICE LIST ON 2nd MESSAGE (fast) =====
+            if count == 1:
+                await asyncio.sleep(0.3)
                 try:
                     price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
                     price_image = get_setting('price_list_image', '')
@@ -238,6 +238,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                         await client.send_file(chat_id, price_image, caption=price_text)
                     else:
                         await event.respond(price_text)
+                    logger.info(f"✅ Price list sent to {sender_id}")
                 except Exception as e:
                     logger.error(f"Price list error: {e}")
             
@@ -246,7 +247,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
     except Exception as e:
         logger.error(f"AI mode error: {e}")
         try:
-            await event.respond(get_minimal_fallback(""))
+            await event.respond("Payment karo baby, phir service milega 😘")
         except:
             pass
 
@@ -336,12 +337,12 @@ async def handle_keyword_mode(event, client, acc_info):
                 if typing_enabled:
                     async with client.action(chat_id, "typing"):
                         await asyncio.sleep(typing_duration)
-                default_reply = get_setting('default_reply_text', 'Hi baby')
+                default_reply = get_setting('default_reply_text', 'Payment karo baby')
                 await event.respond(default_reply)
     except Exception as e:
         logger.error(f"Keyword mode error: {e}")
 
-# ===== ADMIN BOT HANDLERS =====
+# ===== ADMIN BOT HANDLERS (Full admin panel) =====
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     connected = len(accounts)
     model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
@@ -719,7 +720,7 @@ async def run_bot():
     asyncio.create_task(keep_accounts_alive())
     logger.info("✅ Keep-alive started")
     
-    # ===== FORCE CLEANUP - Kill any existing polling =====
+    # Cleanup webhook
     for attempt in range(3):
         try:
             bot = Bot(token=BOT_TOKEN)
@@ -772,7 +773,7 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 def run_main():
-    # ===== KILL OLD INSTANCES =====
+    # Kill old instances
     try:
         current_pid = os.getpid()
         result = subprocess.run(["ps", "aux"], capture_output=True, text=True)

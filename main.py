@@ -4,12 +4,14 @@ import json
 import logging
 import random
 import shutil
+import atexit
+import signal
 from threading import Thread
 from time import sleep
 
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import Application, ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -41,6 +43,7 @@ _welcomed_chats = set()
 customer_message_count = {}
 customer_payment_photos = {}
 SESSION_FILE = "saved_sessions.json"
+PID_FILE = "bot.pid"
 
 DEFAULT_PRICE_LIST = """💕 **SHRUTI'S PRICE LIST** 💕
 
@@ -57,31 +60,107 @@ shruti_bot = None
 def get_ai_bot():
     global shruti_bot
     if shruti_bot is None:
-        shruti_bot = ShrutiAIBot()
+        try:
+            shruti_bot = ShrutiAIBot()
+            logger.info("✅ Shruti AI Bot initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to init AI bot: {e}")
     return shruti_bot
+
+# ===== PID FILE (prevent duplicate instances) =====
+def cleanup_pid():
+    if os.path.exists(PID_FILE):
+        try:
+            os.remove(PID_FILE)
+            logger.info("🧹 PID file cleaned")
+        except:
+            pass
+
+def check_pid():
+    if os.path.exists(PID_FILE):
+        with open(PID_FILE, 'r') as f:
+            old_pid = f.read().strip()
+        try:
+            os.kill(int(old_pid), signal.SIGTERM)
+            logger.warning(f"🔪 Killed old instance (PID: {old_pid})")
+            sleep(2)
+        except (ProcessLookupError, ValueError):
+            pass
+    
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    
+    atexit.register(cleanup_pid)
 
 # ===== CONTEXTUAL FALLBACK REPLY (AI fail korle) =====
 def get_contextual_reply(msg_text):
-    """Generate a contextual reply based on user message - AI backup"""
+    """Smart contextual fallback with Bengali + Hinglish"""
     msg_lower = msg_text.lower().strip()
     
     greetings = ['hi', 'hello', 'hey', 'hy', 'hlw', 'hii', 'hlo', 'helloo', 'halo', 'helo', 'heloo']
     how_are = ['how are you', 'kemon acho', 'kasa hai', 'kaisa hai', 'kemon', 'kese ho', 'kaise ho']
-    name_questions = ['your name', 'apnar nam', 'tumar nam', 'name kya', 'nam ki', 'ke tumi', 'keya nam', 'kya nam']
-    payment_words = ['pay', 'payment', 'price', 'rate', 'dham', 'cost', 'koto', 'price list', 'kitne', 'kitna']
+    name_questions = ['your name', 'apnar nam', 'tumar nam', 'name kya', 'nam ki', 'ke tumi', 'keya nam', 'kya nam', 'nam keya', 'naam', 'apni ke', 'tumi ke', 'who are you']
+    payment_words = ['pay', 'payment', 'price', 'rate', 'dham', 'cost', 'koto', 'price list', 'kitne', 'kitna', 'price kya', 'rate kya']
+    service_words = ['service', 'servic', 'survice', 'sarvice', 'service lena', 'survice lena', 'lena hai', 'chahiye', 'kharid', 'leni hai']
+    video_words = ['video', 'call', 'video call', 'demo', 'show', 'demo show']
+    abuse_words = ['gand', 'land', 'chut', 'madarchod', 'bhosdike', 'randi', 'bc', 'mc', 'bhadva']
+    
+    fallback_replies = [
+        "Haan baby, aap kya chahte ho? Mujhe clearly batao na 😊",
+        "Baby, aap thoda details mein boliye... kya chahiye? 😘",
+        "Hmm, interesting! Lekin mujhe samjhao na ki aap kya chahte ho? 😊",
+        "Baby, aap thoda aur batao na... main ready hoon sunne ke liye 😘",
+        "Arre baby, aap toh mystery ho! Kya chahte ho batao na 😊",
+        "Hello baby! Aap kya bolna chahte ho? Main yahan hoon aapke liye 😘"
+    ]
     
     if any(g in msg_lower for g in greetings):
-        return f"Hello baby! Kya haal hai aapke? 😘"
+        return random.choice([
+            "Hello baby! Kya haal hai aapke? 😘",
+            "Hyeee baby! Bahut din baad dikhe! Kaise ho? 😊",
+            "Haanji baby, aayiye aayiye! Kya bolna chahte ho? 😘",
+            "Hey baby! Mein to aapki intazar kar rahi thi 😊"
+        ])
     elif any(h in msg_lower for h in how_are):
-        return "Main bilkul theek hoon baby! Aap batao kya ho raha hai? 😘"
+        return random.choice([
+            "Main bilkul theek hoon baby! Aap batao kya chal raha hai? 😘",
+            "Aapke liye to hamesha ready hoon baby! Aap batao kya haal hai? 😊",
+            "Bus busy busy! Lekin aapke liye time hai hamesha ❤️"
+        ])
     elif any(n in msg_lower for n in name_questions):
-        return "Mera naam Shruti hai baby! Aapka kya naam hai? 😊"
+        return random.choice([
+            "Mera naam Shruti hai baby! Aapka kya naam hai? 😊",
+            "Shruti hoon main! Aap kaunsa naam rakhenge mere liye? 😘",
+            "Main Shruti! Aap toh itne din baad bhi nahi jaante mera naam? 😢",
+            "I'm Shruti, aapki pyari si ladki! Aapka naam batao na 😊"
+        ])
     elif any(p in msg_lower for p in payment_words):
-        return "Payment details mere profile mein check karo baby! 😘"
-    elif len(msg_text) < 5:
-        return f"Haanji baby, kya bolna chahte ho? 😊"
+        return random.choice([
+            "Payment details mere profile mein check karo baby! 😘",
+            "Price list mere profile mein hai! Check karo aur screenshot bhejo 😊",
+            "Baby, mere profile mein sab details hai! Jaake dekh lo na 😘"
+        ])
+    elif any(s in msg_lower for s in service_words):
+        return random.choice([
+            "Kya service chahiye baby? Video call, ya kuch aur? Batao na 😘",
+            "Service chahiye? Toh pehle batao kya chahiye, phir price list bhejunga! 😊",
+            "Hmm... service? Video call ya demo show? Mere profile mein sab hai baby! 😘"
+        ])
+    elif any(v in msg_lower for v in video_words):
+        return random.choice([
+            "Video call chahiye? Toh mere profile mein price list check karo baby! 😘",
+            "Demo show sirf ₹19 mein! Check karo mere profile mein details 😊",
+            "Hmm video call? Aap ready ho? Price list profile mein hai 😘"
+        ])
+    elif any(a in msg_lower for a in abuse_words):
+        return random.choice([
+            "Arre baby, aise kyun bol rahe ho? Kya hua? 😢",
+            "Baby, thoda pyar se bolo na... main aapki hoon 😘",
+            "Oho! Aap toh bahut gussa ho! Aao baat karo, sab theek ho jayega 😊",
+            "Baby, gaali mat do na... main aapki achhi ladki hoon 😢"
+        ])
     else:
-        return f"Baby {msg_text} acha hai... aur batao kya chahte ho? 😘"
+        return random.choice(fallback_replies)
 
 # ===== SESSION MANAGEMENT =====
 def _save_sessions():
@@ -215,20 +294,24 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                 logger.info(f"🤖 AI replying to: {msg_text[:50]}...")
                 try:
                     ai_bot = get_ai_bot()
-                    reply = ai_bot.get_reply(sender_id, msg_text, count)
+                    if ai_bot:
+                        reply = ai_bot.get_reply(sender_id, msg_text, count)
+                    else:
+                        logger.error("❌ ai_bot is None!")
+                        reply = None
                     
                     # AI fail check - if None or empty, use contextual
                     if not reply or len(reply.strip()) < 2:
                         logger.warning("⚠️ AI returned empty, using contextual...")
                         await asyncio.sleep(0.3)
                         reply = get_contextual_reply(msg_text)
-                    
-                    # Typing delay for AI
-                    typing_time = min(len(reply) * 0.02, 2.0)
-                    await asyncio.sleep(typing_time)
+                    else:
+                        # AI success - typing delay
+                        typing_time = min(len(reply) * 0.02, 2.0)
+                        await asyncio.sleep(typing_time)
                     
                 except Exception as ai_err:
-                    logger.error(f"❌ AI error: {ai_err}")
+                    logger.error(f"❌ AI error: {ai_err}", exc_info=True)
                     reply = get_contextual_reply(msg_text)
             
             # ===== STEP 3: SEND REPLY =====
@@ -730,25 +813,68 @@ async def run_bot():
     asyncio.create_task(keep_accounts_alive())
     logger.info("✅ Keep-alive started")
     
-    # Clean webhook
+    # ===== CONFLICT FIX: Force clear all updates before starting =====
     from telegram import Bot
     bot = Bot(token=BOT_TOKEN)
-    try:
-        await bot.delete_webhook()
-        logger.info("✅ Webhook deleted")
-    except:
-        pass
     
-    # Setup bot
-    app = Application.builder().token(BOT_TOKEN).build()
+    try:
+        # 1. Delete webhook with pending updates
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Webhook deleted with pending updates dropped")
+        
+        # 2. Small wait
+        await asyncio.sleep(1)
+        
+        # 3. Clear any remaining updates
+        offset = 0
+        while True:
+            updates = await bot.get_updates(offset=offset, timeout=1, limit=100)
+            if not updates:
+                break
+            offset = updates[-1].update_id + 1
+        logger.info(f"✅ Cleared all pending updates (final offset: {offset})")
+        
+        await asyncio.sleep(0.5)
+        
+    except Exception as e:
+        logger.error(f"Webhook/updates cleanup error: {e}")
+    
+    # Setup bot with app builder
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(30)
+        .get_updates_read_timeout(30)
+        .build()
+    )
+    
     app.add_handler(MessageHandler(filters.ALL, message_handler))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_error_handler(error_handler)
     
     await app.initialize()
     await app.start()
-    await app.updater.start_polling()
-    logger.info("✅ Bot polling started!")
+    
+    # Start polling
+    try:
+        await app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+            poll_interval=0.5,
+            timeout=30
+        )
+        logger.info("✅ Bot polling started successfully!")
+    except Exception as e:
+        logger.error(f"❌ Polling start error: {e}")
+        await asyncio.sleep(2)
+        try:
+            await app.updater.start_polling(drop_pending_updates=True)
+            logger.info("✅ Bot polling started on retry!")
+        except Exception as e2:
+            logger.error(f"❌ Polling retry also failed: {e2}")
     
     try:
         await asyncio.Event().wait()
@@ -761,11 +887,24 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 def run_main():
+    # Prevent duplicate instances
+    check_pid()
+    
+    # Start Flask in thread
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask started")
     sleep(2)
-    asyncio.run(run_bot())
+    
+    # Run bot
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by keyboard interrupt")
+    except Exception as e:
+        logger.error(f"❌ Bot crashed: {e}", exc_info=True)
+    finally:
+        cleanup_pid()
 
 if __name__ == "__main__":
     run_main()

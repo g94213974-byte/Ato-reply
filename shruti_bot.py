@@ -32,13 +32,6 @@ PAYMENT_KEYWORDS = ['pay', 'payment', 'qr', 'scan', 'upi', 'paytm', 'phonepe', '
                     'screenshot', 'payment kar', 'pay karo', 'method', 'transfer',
                     'rupees', 'rs', '₹', 'dham', 'money', 'paise']
 
-PIC_KEYWORDS = ['pic', 'pics', 'picture', 'photo', 'image', 'nude pic', 'nude photo',
-                'naked', 'xxx pic', 'sexy pic', 'dikhao', 'show', 'dikha',
-                'nangi', 'boob', 'boobs']
-
-MEET_KEYWORDS = ['real', 'meet', 'mil', 'real meet', 'real sex', 'aao', 'aana',
-                 'ghar', 'location', 'aaja', 'offline', 'face to face']
-
 class ShrutiAIBot:
     def __init__(self):
         self.conversations = {}
@@ -49,21 +42,9 @@ class ShrutiAIBot:
         else:
             logger.info(f"✅ OpenRouter API Key found")
     
-    def check_keywords(self, text, keywords):
-        text_lower = text.lower()
-        return any(kw in text_lower for kw in keywords)
-    
     def get_reply(self, user_id, message_text, message_count=0):
         if not OPENROUTER_API_KEY or not OPENROUTER_API_KEY.startswith('sk-or'):
             return None
-        
-        # Check for pic request
-        if self.check_keywords(message_text, PIC_KEYWORDS):
-            return PIC_REPLY
-        
-        # Check for meet request
-        if self.check_keywords(message_text, MEET_KEYWORDS):
-            return MEET_REPLY
         
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -113,7 +94,6 @@ class ShrutiAIBot:
             if any(w in reply.lower() for w in unwanted):
                 return None
             
-            # Save conversation
             if user_id not in self.conversations:
                 self.conversations[user_id] = []
             self.conversations[user_id].append({"role": "user", "content": message_text})

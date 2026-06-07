@@ -16,7 +16,7 @@ from telegram.error import Conflict
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.functions.contacts import BlockRequest
+from telethon.tl.functions.contacts import BlockRequest, DeleteContactsRequest
 from telethon.tl.functions.messages import ReadHistoryRequest
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
@@ -177,7 +177,6 @@ async def do_typing(client, chat_id):
 
 # ===== SEND PAYMENT QR HELPER =====
 async def send_payment_info(client, chat_id, event=None):
-    """Send payment details with QR code"""
     try:
         upi_id = get_setting('upi_id', '')
         paytm_num = get_setting('paytm_num', '')
@@ -203,24 +202,57 @@ async def send_payment_info(client, chat_id, event=None):
     except Exception as e:
         logger.error(f"Payment info error: {e}")
 
-# ===== PHOTO BLOCK HANDLER =====
+# ===== PHOTO BLOCK HANDLER (Clear chat + Block + Delete contact) =====
 async def handle_photo_block(event, client, sender_id):
-    """Block user who sends photo + delete photo"""
+    """Clear entire chat, then block user - so user can't find you"""
     try:
-        logger.info(f"📸 Blocking photo from {sender_id}")
+        logger.info(f"📸 Photo block initiated for {sender_id}")
         
-        # Block the user
-        await client(BlockRequest(id=sender_id))
-        logger.info(f"✅ User {sender_id} blocked")
+        peer = await event.get_input_chat()
+        chat_id = event.chat_id
         
-        # Delete the photo message
+        # Step 1: Delete the photo message
         try:
-            peer = await event.get_input_chat()
             await client.delete_messages(peer, [event.message.id], revoke=True)
-            logger.info(f"✅ Photo deleted from {sender_id}")
+            logger.info(f"✅ Photo message deleted for {sender_id}")
         except Exception as e:
-            logger.error(f"Delete photo error: {e}")
+            logger.error(f"Delete photo msg error: {e}")
         
+        # Step 2: Delete ALL recent messages (up to 100)
+        try:
+            async for msg in client.iter_messages(peer, limit=100):
+                try:
+                    await client.delete_messages(peer, [msg.id], revoke=True)
+                except:
+                    pass
+            logger.info(f"✅ Chat history cleared for {sender_id}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not delete all messages: {e}")
+        
+        # Step 3: Delete entire dialog
+        try:
+            await client.delete_dialog(peer)
+            logger.info(f"✅ Entire dialog deleted for {sender_id}")
+        except Exception as e:
+            logger.warning(f"⚠️ Dialog delete error: {e}")
+        
+        await asyncio.sleep(1)
+        
+        # Step 4: Block the user
+        try:
+            await client(BlockRequest(id=sender_id))
+            logger.info(f"✅ User {sender_id} blocked!")
+        except Exception as e:
+            logger.error(f"Block error: {e}")
+        
+        # Step 5: Remove from contacts
+        try:
+            await client(DeleteContactsRequest(id=[sender_id]))
+            logger.info(f"✅ User {sender_id} removed from contacts")
+        except:
+            pass
+        
+        logger.info(f"✅ Photo block COMPLETE for {sender_id} - user cannot find you!")
         return True
     except Exception as e:
         logger.error(f"Photo block error: {e}")
@@ -235,12 +267,9 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         # ===== STICKER HANDLER =====
         if event.message.sticker:
             logger.info(f"🎴 Sticker from {sender_id} → price list")
-            
             if sender_id not in customer_message_count:
                 customer_message_count[sender_id] = 0
-            
             await do_typing(client, chat_id)
-            
             try:
                 price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
                 price_image = get_setting('price_list_image', '')
@@ -250,18 +279,15 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                     await event.respond(price_text)
             except:
                 pass
-            
             customer_message_count[sender_id] += 1
             return
         
-        # ===== PHOTO/MEDIA HANDLER (BLOCK) =====
+        # ===== PHOTO/MEDIA HANDLER (BLOCK + CLEAR CHAT) =====
         if event.message.photo or (event.message.document and event.message.document.mime_type and 'image' in event.message.document.mime_type):
             block_enabled = get_setting('block_photo_enabled', '1') == '1'
-            
             if block_enabled:
                 await handle_photo_block(event, client, sender_id)
             else:
-                # If block is disabled, treat as payment screenshot
                 await handle_payment_screenshot(event, client, sender_id)
             return
         
@@ -269,12 +295,10 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         if not msg_text.strip():
             return
         
-        # Track message count
         if sender_id not in customer_message_count:
             customer_message_count[sender_id] = 0
         count = customer_message_count[sender_id]
         
-        # Mark as read
         try:
             peer = await event.get_input_chat()
             await client(ReadHistoryRequest(peer=peer, max_id=event.message.id))
@@ -283,22 +307,20 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         
         msg_lower = msg_text.lower().strip()
         
-        # ===== CUSTOM REPLIES CHECK (FIRST) =====
+        # ===== CUSTOM REPLIES CHECK =====
         replies = get_all_replies()
         custom_match = None
         
         for rid, keyword, reply_text, rtype in replies:
             kw = keyword.lower().strip()
-            if rtype == "exact":
-                if msg_lower == kw:
-                    custom_match = reply_text
-                    logger.info(f"✅ Custom reply matched (exact): '{kw}' → '{reply_text[:30]}...'")
-                    break
-            elif rtype == "contains":
-                if kw in msg_lower:
-                    custom_match = reply_text
-                    logger.info(f"✅ Custom reply matched (contains): '{kw}' in '{msg_lower[:30]}...'")
-                    break
+            if rtype == "exact" and msg_lower == kw:
+                custom_match = reply_text
+                logger.info(f"✅ Custom reply matched (exact): '{kw}'")
+                break
+            elif rtype == "contains" and kw in msg_lower:
+                custom_match = reply_text
+                logger.info(f"✅ Custom reply matched (contains): '{kw}'")
+                break
         
         if custom_match:
             await do_typing(client, chat_id)
@@ -306,24 +328,22 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
             customer_message_count[sender_id] = count + 1
             return
         
-        # ===== PAYMENT KEYWORDS CHECK (kaha karu, kisme karu, kaise karu etc) =====
+        # ===== PAYMENT QUESTION CHECK =====
         payment_question_keywords = ['kaha kar', 'kisme kar', 'kaise kar', 'kaha pay', 'kaise pay',
                                      'kaha bhej', 'kaise bhej', 'method', 'scan', 'qr', 'upi id',
                                      'kya hai', 'kaha hai', 'kaise', 'kaha', 'kisme']
         
         is_payment_question = any(kw in msg_lower for kw in payment_question_keywords)
-        
-        # Also check if it's a general payment query
         is_payment = any(kw in msg_lower for kw in PAYMENT_KEYWORDS)
         
         if is_payment_question or is_payment:
-            logger.info(f"💰 Payment query from {sender_id}: {msg_text[:40]}")
+            logger.info(f"💰 Payment query from {sender_id}")
             await do_typing(client, chat_id)
             await send_payment_info(client, chat_id, event)
             customer_message_count[sender_id] = count + 1
             return
         
-        # ===== PHOTO BLOCK KEYWORDS CHECK (pic, nude etc as TEXT) =====
+        # ===== PHOTO BLOCK KEYWORDS (TEXT) =====
         if any(kw in msg_lower for kw in PHOTO_BLOCK_KEYWORDS):
             await do_typing(client, chat_id)
             await event.respond("Pic free nahi baby 😘 Payment karo, VC lo 🔥")
@@ -332,7 +352,6 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         
         # ===== SERVICE KEYWORDS =====
         is_service = any(kw in msg_lower for kw in SERVICE_KEYWORDS)
-        
         if is_service:
             await do_typing(client, chat_id)
             price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
@@ -341,7 +360,6 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                 await client.send_file(chat_id, price_image, caption=price_text)
             else:
                 await event.respond(price_text)
-            
             await asyncio.sleep(0.5)
             await event.respond(random.choice([
                 "Kitna time chahiye baby? 10 min ya 20? 😘",
@@ -354,7 +372,6 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         # ===== REAL MEET CHECK =====
         meet_keywords = ['real', 'meet', 'mil', 'real meet', 'aao', 'aana', 'ghar', 'location',
                         'aaja', 'offline', 'face to face', 'real video', 'milna', 'live']
-        
         if any(kw in msg_lower for kw in meet_keywords):
             await do_typing(client, chat_id)
             await event.respond("Only online service baby 😊 Pay karo 🔥")
@@ -363,7 +380,6 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         
         # ===== NORMAL REPLY =====
         await do_typing(client, chat_id)
-        
         try:
             ai_bot = get_ai_bot()
             reply = None
@@ -388,15 +404,12 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
 
 # ===== SHORT REPLY GENERATOR =====
 def get_short_reply(msg_lower, count):
-    """Short, payment focused replies"""
-    
     if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'hii', 'hy', 'hlo', 'helo']):
         return random.choice([
             "Hi baby 😘 Kitna time chahiye? 🔥",
             "Hello baby 😊 Service lena hai? ❤️",
             "Hii baby 😘 Pay karo na 🔥"
         ])
-    
     return random.choice([
         "Pay karo baby, maza lo 😘🔥",
         "Payment karo na baby 😊",
@@ -451,7 +464,6 @@ async def handle_keyword_mode(event, client, acc_info):
         msg_text = event.message.text or ""
         chat_id = event.chat_id
         
-        # Photo block for keyword mode too
         if event.message.photo:
             block_enabled = get_setting('block_photo_enabled', '1') == '1'
             if block_enabled:
@@ -478,16 +490,15 @@ async def handle_keyword_mode(event, client, acc_info):
             if rtype == "exact" and msg_lower == kw:
                 matched = True
                 await event.respond(reply_text)
-                logger.info(f"✅ Keyword mode matched (exact): {kw}")
+                logger.info(f"✅ Keyword mode matched: {kw}")
                 break
             elif rtype == "contains" and kw in msg_lower:
                 matched = True
                 await event.respond(reply_text)
-                logger.info(f"✅ Keyword mode matched (contains): {kw}")
+                logger.info(f"✅ Keyword mode matched: {kw}")
                 break
         
         if not matched:
-            # Check for payment question
             payment_question_keywords = ['kaha kar', 'kisme kar', 'kaise kar', 'kaha pay', 'kaise pay',
                                          'kaha bhej', 'kaise bhej', 'method', 'scan', 'qr', 'upi id']
             if any(kw in msg_lower for kw in payment_question_keywords):
@@ -813,10 +824,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = get_setting('block_photo_enabled','1')
         set_setting('block_photo_enabled', '0' if cur=='1' else '1')
         await button_callback(update, context)
-    elif data == "tty":
-        cur = get_setting('typing_enabled','1')
-        # No, this is separate. Let's keep it.
-        await button_callback(update, context)
     elif data == "stt":
         kb = [
             [InlineKeyboardButton("⏱️ 2s", callback_data="tt_2"), InlineKeyboardButton("⏱️ 3s", callback_data="tt_3"), InlineKeyboardButton("⏱️ 5s", callback_data="tt_5")],
@@ -885,7 +892,6 @@ async def run_bot():
     asyncio.create_task(keep_accounts_alive())
     logger.info("✅ Keep-alive started")
     
-    # Aggressive cleanup
     for attempt in range(5):
         try:
             bot = Bot(token=BOT_TOKEN)

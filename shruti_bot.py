@@ -29,10 +29,30 @@ You are Shruti - a real, flirty Indian girl!"""
 
 class ShrutiAIBot:
     def __init__(self):
-        self.conversations = {}  # user_id -> list of messages
+        self.conversations = {}
+        # Check API key on init
+        if not OPENROUTER_API_KEY:
+            logger.error("❌ OPENROUTER_API_KEY is EMPTY! Check config.py")
+        elif not OPENROUTER_API_KEY.startswith('sk-or'):
+            logger.error(f"❌ OPENROUTER_API_KEY looks invalid: {OPENROUTER_API_KEY[:10]}...")
+        else:
+            logger.info(f"✅ OpenRouter API Key found: {OPENROUTER_API_KEY[:10]}...")
+        logger.info(f"🧠 Model: {OPENROUTER_MODEL}")
     
     def get_reply(self, user_id, message_text, message_count=0):
         """Get AI reply for a user message"""
+        
+        # ===== DEBUG: Log what's happening =====
+        logger.info(f"🔍 get_reply called for user {user_id}: {message_text[:50]}...")
+        
+        if not OPENROUTER_API_KEY:
+            logger.error("❌ OPENROUTER_API_KEY is missing!")
+            return None
+            
+        if not OPENROUTER_API_KEY.startswith('sk-or'):
+            logger.error(f"❌ OPENROUTER_API_KEY format invalid: {OPENROUTER_API_KEY[:15]}...")
+            return None
+        
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json"
@@ -41,12 +61,10 @@ class ShrutiAIBot:
         # Build conversation history
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         
-        # Add conversation history if exists
         if user_id in self.conversations:
             for msg in self.conversations[user_id][-20:]:
                 messages.append(msg)
         
-        # Add current user message
         messages.append({"role": "user", "content": message_text})
         
         payload = {
@@ -57,29 +75,51 @@ class ShrutiAIBot:
         }
         
         try:
+            logger.info(f"📤 Sending to OpenRouter...")
+            
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=30
             )
-            response.raise_for_status()
+            
+            logger.info(f"📥 OpenRouter response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                logger.error(f"❌ OpenRouter HTTP {response.status_code}: {response.text[:300]}")
+                return None
+            
             data = response.json()
+            
+            if "choices" not in data or len(data["choices"]) == 0:
+                logger.error(f"❌ No choices in response")
+                return None
+            
             reply = data["choices"][0]["message"]["content"]
             
-            # Save to conversation history
+            if not reply or len(reply.strip()) < 2:
+                logger.warning("⚠️ Empty reply from OpenRouter")
+                return None
+            
+            # Save conversation
             if user_id not in self.conversations:
                 self.conversations[user_id] = []
             self.conversations[user_id].append({"role": "user", "content": message_text})
             self.conversations[user_id].append({"role": "assistant", "content": reply})
             
-            # Keep only last 50 messages
             if len(self.conversations[user_id]) > 50:
                 self.conversations[user_id] = self.conversations[user_id][-50:]
             
+            logger.info(f"✅ AI reply: {reply[:60]}...")
             return reply
             
+        except requests.exceptions.Timeout:
+            logger.error("❌ OpenRouter timeout!")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error("❌ OpenRouter connection error - Check internet/API endpoint")
+            return None
         except Exception as e:
-            logger.error(f"❌ OpenRouter API error: {e}")
-            # Return None - main.py will handle with contextual reply
+            logger.error(f"❌ AI error: {e}", exc_info=True)
             return None

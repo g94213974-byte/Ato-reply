@@ -366,9 +366,27 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                 await event.respond(price_text)
             await asyncio.sleep(0.5)
             await event.respond(random.choice([
-                "Kitna time chahiye baby? 10 min ya 20? 😘",
-                "Batao kitna minute lena hai? 🔥",
-                "Kitna time ka chahiye? Pay karo maza lo 😘"
+                "💰 SHRUTI PRICE LIST 💰
+
+🔥 10 MIN VC → ₹99
+🔥 20 MIN VC → ₹119
+🎬 DEMO (2 MIN FULL NUDE) → ₹49
+
+💳 Pay karo baby, phir maza lo! 😘",
+        "💰 SHRUTI PRICE LIST 💰
+
+🔥 10 MIN VC → ₹99
+🔥 20 MIN VC → ₹119
+🎬 DEMO (2 MIN FULL NUDE) → ₹49
+
+💳 Pay karo baby, phir maza lo! 😘",
+                "💰 SHRUTI PRICE LIST 💰
+
+🔥 10 MIN VC → ₹99
+🔥 20 MIN VC → ₹119
+🎬 DEMO (2 MIN FULL NUDE) → ₹49
+
+💳 Pay karo baby, phir maza lo! 😘"
             ]))
             customer_message_count[sender_id] = count + 1
             return

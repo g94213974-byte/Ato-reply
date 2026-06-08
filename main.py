@@ -175,7 +175,7 @@ async def do_typing(client, chat_id):
         logger.error(f"Typing error: {e}")
         await asyncio.sleep(0.3)
 
-# ===== SEND PAYMENT QR HELPER =====
+# ===== SEND PAYMENT QR HELPER (FIXED) =====
 async def send_payment_info(client, chat_id, event=None):
     try:
         upi_id = get_setting('upi_id', '')
@@ -189,16 +189,23 @@ async def send_payment_info(client, chat_id, event=None):
             payment_msg += f"💳 **PayTm:** `{paytm_num}`\n"
         payment_msg += "\n**Scan karo baby, payment karo 😘🔥**"
         
-        if qr_path and os.path.exists(qr_path):
+        # QR পাথ চেক
+        qr_exists = qr_path and os.path.exists(qr_path)
+        
+        if qr_exists:
             try:
                 await client.send_file(chat_id, qr_path, caption=payment_msg)
                 logger.info(f"✅ QR sent to {chat_id}")
+                return  # ✅ সফল হলে রিটার্ন - আর কিছু পাঠাবে না
             except Exception as e:
                 logger.error(f"QR send error: {e}")
+                # QR পাঠাতে ব্যর্থ হলে শুধু টেক্সট পাঠাবে, আলাদা মেসেজ না
                 await event.respond(payment_msg)
         else:
-            await event.respond(payment_msg)
-            await event.respond("⚠️ **QR code set nahi hai! Admin se set karwao**")
+            # QR নেই - একসাথে মেসেজে বলে দাও
+            full_msg = payment_msg + "\n\n⚠️ **QR code set nahi hai! Admin se set karwao**"
+            await event.respond(full_msg)
+            
     except Exception as e:
         logger.error(f"Payment info error: {e}")
 
@@ -258,7 +265,7 @@ async def handle_photo_block(event, client, sender_id):
         logger.error(f"Photo block error: {e}")
         return False
 
-# ===== AI MODE =====
+# ===== AI MODE (FIXED) =====
 async def handle_ai_mode(event, client, acc_info, sender_id):
     try:
         msg_text = event.message.text or ""
@@ -328,15 +335,12 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
             customer_message_count[sender_id] = count + 1
             return
         
-        # ===== PAYMENT QUESTION CHECK =====
-        payment_question_keywords = ['kaha kar', 'kisme kar', 'kaise kar', 'kaha pay', 'kaise pay',
+        # ===== PAYMENT QUESTION CHECK (FIXED - একবারই রেসপন্ড করবে) =====
+        is_payment = any(kw in msg_lower for kw in PAYMENT_KEYWORDS + ['kaha kar', 'kisme kar', 'kaise kar', 'kaha pay', 'kaise pay',
                                      'kaha bhej', 'kaise bhej', 'method', 'scan', 'qr', 'upi id',
-                                     'kya hai', 'kaha hai', 'kaise', 'kaha', 'kisme']
+                                     'kya hai', 'kaha hai'])
         
-        is_payment_question = any(kw in msg_lower for kw in payment_question_keywords)
-        is_payment = any(kw in msg_lower for kw in PAYMENT_KEYWORDS)
-        
-        if is_payment_question or is_payment:
+        if is_payment:
             logger.info(f"💰 Payment query from {sender_id}")
             await do_typing(client, chat_id)
             await send_payment_info(client, chat_id, event)

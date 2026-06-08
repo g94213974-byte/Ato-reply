@@ -7,8 +7,6 @@ import shutil
 import signal
 import subprocess
 import time
-import socket
-import fcntl
 from threading import Thread
 from time import sleep
 
@@ -21,7 +19,6 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import BlockRequest, DeleteContactsRequest
 from telethon.tl.functions.messages import ReadHistoryRequest
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
 from database import init_db, get_setting, set_setting, add_reply, delete_reply, get_all_replies, get_reply_count
 from config import BOT_TOKEN, ADMIN_ID, ACCOUNTS, API_ID, API_HASH
@@ -41,16 +38,12 @@ def home():
 def health():
     return jsonify({"status": "ok"}), 200
 
-# ===== GLOBAL VARIABLES =====
+# ===== GLOBAL =====
 accounts = []
-_welcomed_chats = set()
-customer_message_count = {}
+customer_count = {}  # {user_id: count}
 customer_payment_photos = {}
-_processing_users = set()
+_processing = set()
 SESSION_FILE = "saved_sessions.json"
-
-_user_message_buffer = {}
-_buffer_tasks = {}
 
 DEFAULT_PRICE_LIST = """💰 **SHRUTI PRICE LIST** 💰
 
@@ -60,11 +53,11 @@ DEFAULT_PRICE_LIST = """💰 **SHRUTI PRICE LIST** 💰
 
 💳 **Pay karo baby, phir maza lo!** 😘"""
 
-SERVICE_KEYWORDS = ['service', 'servic', 'survice', 'sarvice', 'lena hai', 'chahiye', 'kharid', 
+SERVICE_KEYWORDS = ['service', 'servic', 'survice', 'sarvice', 'lena hai', 'chahiye', 'kharid',
                     'leni hai', 'demo', 'video', 'call', 'vc', 'price', 'rate', 'kya milega',
                     'kya service', 'kaam', 'kya hai', 'dikhao', 'show']
 
-PAYMENT_KEYWORDS = ['pay', 'payment', 'qr', 'scan', 'upi', 'paytm', 'phonepe', 'gpay', 
+PAYMENT_KEYWORDS = ['pay', 'payment', 'qr', 'scan', 'upi', 'paytm', 'phonepe', 'gpay',
                     'google pay', 'kaha', 'kaise', 'account', 'bank', 'send', 'bhejo',
                     'screenshot', 'payment kar', 'pay karo', 'kaise pay', 'method', 'transfer',
                     'rupees', 'rs', '.', 'dham', 'send karo', 'money', 'paise', 'payment method',
@@ -82,54 +75,26 @@ def get_ai_bot():
     if shruti_bot is None:
         try:
             shruti_bot = ShrutiAIBot()
-            logger.info("Shruti AI Bot initialized")
+            logger.info("AI Bot initialized")
         except Exception as e:
-            logger.error(f"Failed to init AI bot: {e}")
+            logger.error(f"AI bot init error: {e}")
     return shruti_bot
-
-def set_customer_count(user_id, count):
-    try:
-        import sqlite3
-        conn = sqlite3.connect('shrutibot.db')
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS customer_counts 
-                     (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0)''')
-        c.execute('INSERT OR REPLACE INTO customer_counts (user_id, count) VALUES (?, ?)', (user_id, count))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"set_customer_count error: {e}")
-
-def get_customer_count(user_id):
-    try:
-        import sqlite3
-        conn = sqlite3.connect('shrutibot.db')
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS customer_counts 
-                     (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0)''')
-        c.execute('SELECT count FROM customer_counts WHERE user_id = ?', (user_id,))
-        row = c.fetchone()
-        conn.close()
-        return row[0] if row else 0
-    except Exception as e:
-        logger.error(f"get_customer_count error: {e}")
-        return 0
 
 def _save_sessions():
     sessions = [acc['session'] for acc in accounts if 'session' in acc and acc['session']]
     try:
         with open(SESSION_FILE, 'w') as f:
             json.dump(sessions, f, indent=2)
-    except Exception as e:
-        logger.error(f"Session save error: {e}")
+    except:
+        pass
 
 def _load_sessions():
     try:
         if os.path.exists(SESSION_FILE):
             with open(SESSION_FILE, 'r') as f:
                 return json.load(f)
-    except Exception as e:
-        logger.error(f"Session load error: {e}")
+    except:
+        pass
     return []
 
 async def start_single_account(session_string):
@@ -137,7 +102,6 @@ async def start_single_account(session_string):
         client = TelegramClient(StringSession(session_string), API_ID, API_HASH, sequential_updates=True)
         await client.start()
         me = await client.get_me()
-        
         acc_info = {
             'id': me.id,
             'name': me.first_name or f"User{me.id}",
@@ -156,324 +120,159 @@ async def start_single_account(session_string):
         return None
 
 async def start_all_accounts():
-    saved_sessions = _load_sessions()
-    if saved_sessions:
-        logger.info(f"Starting {len(saved_sessions)} saved accounts...")
-        for session in saved_sessions:
+    saved = _load_sessions()
+    if saved:
+        for s in saved:
             try:
-                await start_single_account(session)
+                await start_single_account(s)
                 await asyncio.sleep(2)
-            except Exception as e:
-                logger.error(f"Account start error: {e}")
-    logger.info(f"{len(accounts)} accounts connected!")
+            except:
+                pass
+    logger.info(f"{len(accounts)} accounts connected")
 
 def _register_handler(client, acc_info):
     @client.on(events.NewMessage(incoming=True))
-    async def auto_reply_handler(event):
+    async def handler(event):
         try:
             if not event.is_private:
                 return
-            
             sender = await event.get_sender()
-            if sender is None:
+            if not sender:
                 return
-            sender_id = sender.id
-            if sender_id == ADMIN_ID:
+            uid = sender.id
+            if uid == ADMIN_ID:
                 return
             if not acc_info.get('enabled', True):
                 return
-            
-            if sender_id in _processing_users:
-                logger.info(f"{sender_id} already processing, skipping")
+            if uid in _processing:
                 return
-            
-            if event.message.sticker or event.message.photo or (event.message.document and event.message.document.mime_type and 'image' in event.message.document.mime_type):
-                _processing_users.add(sender_id)
-                try:
-                    await handle_media_messages(event, client, acc_info, sender_id)
-                finally:
-                    _processing_users.discard(sender_id)
-                return
-            
-            if not (event.message.text or "").strip():
-                return
-            
-            if sender_id not in _user_message_buffer:
-                _user_message_buffer[sender_id] = []
-            _user_message_buffer[sender_id].append((event, time.time()))
-            
-            if sender_id in _buffer_tasks:
-                return
-            
-            async def process_buffer(uid):
-                await asyncio.sleep(2)
-                _processing_users.add(uid)
-                try:
-                    messages = _user_message_buffer.pop(uid, [])
-                    if not messages:
-                        return
-                    
-                    logger.info(f"Processing {len(messages)} message(s) from {uid}")
-                    
-                    prev_count = get_customer_count(uid)
-                    
-                    if prev_count == 0:
-                        first_event = messages[0][0]
-                        await do_typing(client, first_event.chat_id)
-                        await send_welcome(client, first_event.chat_id)
-                        set_customer_count(uid, 1)
-                        logger.info(f"Welcome sent to {uid} (batched)")
-                    else:
-                        last_event = messages[-1][0]
-                        mode = acc_info.get('mode', 'ai')
-                        if mode == 'keyword':
-                            await handle_keyword_mode(last_event, client, acc_info)
-                        else:
-                            await handle_ai_mode_single(last_event, client, acc_info, uid)
-                finally:
-                    _processing_users.discard(uid)
-                    if uid in _buffer_tasks:
-                        del _buffer_tasks[uid]
-            
-            _buffer_tasks[sender_id] = asyncio.create_task(process_buffer(sender_id))
-        
+            _processing.add(uid)
+            try:
+                await process_message(event, client, acc_info, uid)
+            finally:
+                _processing.discard(uid)
         except Exception as e:
             logger.error(f"Handler error: {e}")
-            _processing_users.discard(sender_id)
-            if sender_id in _buffer_tasks:
-                del _buffer_tasks[sender_id]
+            _processing.discard(uid)
 
-async def handle_media_messages(event, client, acc_info, sender_id):
-    try:
-        chat_id = event.chat_id
-        
-        if event.message.sticker:
-            logger.info(f"Sticker from {sender_id}")
-            prev_count = get_customer_count(sender_id)
-            if prev_count == 0:
-                await do_typing(client, chat_id)
-                await send_welcome(client, chat_id)
-                set_customer_count(sender_id, 1)
-            return
-        
-        if event.message.photo or (event.message.document and event.message.document.mime_type and 'image' in event.message.document.mime_type):
-            block_enabled = get_setting('block_photo_enabled', '1') == '1'
-            if block_enabled:
-                await handle_photo_block(event, client, sender_id)
-            else:
-                await handle_payment_screenshot(event, client, sender_id)
-            return
-    except Exception as e:
-        logger.error(f"Media handler error: {e}")
-
-async def do_typing(client, chat_id):
-    try:
-        typing_enabled = get_setting('typing_enabled', '1') == '1'
-        if not typing_enabled:
-            await asyncio.sleep(0.3)
-            return
-        typing_duration = int(get_setting('typing_duration', '3'))
-        async with client.action(chat_id, "typing"):
-            await asyncio.sleep(typing_duration)
-    except Exception as e:
-        logger.error(f"Typing error: {e}")
-        await asyncio.sleep(0.3)
-
-async def send_payment_info(client, chat_id, event=None):
-    try:
-        upi_id = get_setting('upi_id', '')
-        paytm_num = get_setting('paytm_num', '')
-        qr_path = get_setting('qr_code_path', '')
-        
-        payment_msg = "**💰 Payment Details 💰**\n\n"
-        if upi_id:
-            payment_msg += f"📱 **UPI ID:** `{upi_id}`\n"
-        if paytm_num:
-            payment_msg += f"💳 **PayTm:** `{paytm_num}`\n"
-        payment_msg += "\n**Scan karo baby, payment karo 😘🔥**"
-        
-        qr_exists = qr_path and os.path.exists(qr_path)
-        
-        if qr_exists:
-            try:
-                await client.send_file(chat_id, qr_path, caption=payment_msg)
-                logger.info(f"QR sent to {chat_id}")
-                return
-            except Exception as e:
-                logger.error(f"QR send error: {e}")
-                await event.respond(payment_msg)
-        else:
-            full_msg = payment_msg + "\n\n⚠️ **QR code set nahi hai! Admin se set karwao**"
-            await event.respond(full_msg)
-    except Exception as e:
-        logger.error(f"Payment info error: {e}")
-
-async def handle_photo_block(event, client, sender_id):
-    try:
-        logger.info(f"Photo block initiated for {sender_id}")
-        peer = await event.get_input_chat()
-        
-        try:
-            await client.delete_messages(peer, [event.message.id], revoke=True)
-        except Exception as e:
-            logger.error(f"Delete photo msg error: {e}")
-        
-        try:
-            async for msg in client.iter_messages(peer, limit=100):
-                try:
-                    await client.delete_messages(peer, [msg.id], revoke=True)
-                except:
-                    pass
-        except Exception as e:
-            logger.warning(f"Could not delete all messages: {e}")
-        
-        try:
-            await client.delete_dialog(peer)
-        except Exception as e:
-            logger.warning(f"Dialog delete error: {e}")
-        
-        await asyncio.sleep(1)
-        
-        try:
-            await client(BlockRequest(id=sender_id))
-        except Exception as e:
-            logger.error(f"Block error: {e}")
-        
-        try:
-            await client(DeleteContactsRequest(id=[sender_id]))
-        except:
-            pass
-        
-        logger.info(f"Photo block COMPLETE for {sender_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Photo block error: {e}")
-        return False
-
-async def send_welcome(client, chat_id):
-    try:
-        welcome_text = get_setting('welcome_message', '')
-        welcome_image = get_setting('welcome_image', '')
-        
-        if not welcome_text:
-            welcome_text = "💰 **SHRUTI PRICE LIST** 💰\n\n🔥 10 MIN VC → ₹99\n🔥 20 MIN VC → ₹119\n🎬 DEMO (2 MIN FULL NUDE) → ₹49\n\n💳 **Pay karo baby, phir maza lo!** 😘"
-        
-        if welcome_image and os.path.exists(welcome_image):
-            try:
-                await client.send_file(chat_id, welcome_image, caption=welcome_text)
-                return
-            except:
-                pass
-        
-        await client.send_message(chat_id, welcome_text)
-    except Exception as e:
-        logger.error(f"Welcome send error: {e}")
-
-async def handle_ai_mode_single(event, client, acc_info, sender_id):
-    try:
-        msg_text = event.message.text or ""
-        chat_id = event.chat_id
-        
-        if not msg_text.strip():
-            return
-        
-        try:
-            peer = await event.get_input_chat()
-            await client(ReadHistoryRequest(peer=peer, max_id=event.message.id))
-        except:
-            pass
-        
-        msg_lower = msg_text.lower().strip()
-        
-        prev_count = get_customer_count(sender_id)
-        if prev_count == 0:
-            set_customer_count(sender_id, 1)
-            prev_count = 1
-        
-        replies = get_all_replies()
-        custom_match = None
-        
-        for rid, keyword, reply_text, rtype in replies:
-            kw = keyword.lower().strip()
-            if rtype == "exact" and msg_lower == kw:
-                custom_match = reply_text
-                break
-            elif rtype == "contains" and kw in msg_lower:
-                custom_match = reply_text
-                break
-        
-        if custom_match:
-            await do_typing(client, chat_id)
-            await event.respond(custom_match)
-            set_customer_count(sender_id, prev_count + 1)
-            return
-        
-        is_payment = any(kw in msg_lower for kw in PAYMENT_KEYWORDS + ['kaha kar', 'kisme kar', 'kaise kar', 'kaha pay', 'kaise pay',
-                                     'kaha bhej', 'kaise bhej', 'method', 'scan', 'qr', 'upi id',
-                                     'kya hai', 'kaha hai'])
-        
-        if is_payment:
-            await do_typing(client, chat_id)
-            await send_payment_info(client, chat_id, event)
-            set_customer_count(sender_id, prev_count + 1)
-            return
-        
-        if any(kw in msg_lower for kw in PHOTO_BLOCK_KEYWORDS):
-            await do_typing(client, chat_id)
-            await event.respond("Payment karo baby, phir maza lo 😘🔥 Service ready hai! 💯")
-            set_customer_count(sender_id, prev_count + 1)
-            return
-        
-        is_service = any(kw in msg_lower for kw in SERVICE_KEYWORDS)
-        if is_service:
-            await do_typing(client, chat_id)
-            price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
-            price_image = get_setting('price_list_image', '')
-            if price_image and os.path.exists(price_image):
-                await client.send_file(chat_id, price_image, caption=price_text)
-            else:
-                await event.respond(price_text)
-            await asyncio.sleep(0.5)
-            await event.respond(random.choice([
-                "Bolo kitna time chahiye? 10 min ya 20 min? 🔥",
-                "Pay karo baby, ready hoon main! 😘",
-                "Payment karo, phir maza lo! 💯"
-            ]))
-            set_customer_count(sender_id, prev_count + 1)
-            return
-        
-        meet_keywords = ['real', 'meet', 'mil', 'real meet', 'aao', 'aana', 'ghar', 'location',
-                        'aaja', 'offline', 'face to face', 'real video', 'milna', 'live']
-        if any(kw in msg_lower for kw in meet_keywords):
-            await do_typing(client, chat_id)
-            await event.respond("Only online service baby 😊 Payment karo, ready hoon! 🔥")
-            set_customer_count(sender_id, prev_count + 1)
-            return
-        
-        await do_typing(client, chat_id)
-        try:
-            ai_bot = get_ai_bot()
-            reply = None
-            if ai_bot:
-                reply = ai_bot.get_reply(sender_id, msg_text, prev_count)
-            if not reply:
-                reply = get_service_ready_reply(msg_lower, prev_count)
-        except:
-            reply = get_service_ready_reply(msg_lower, prev_count)
-        
-        if reply:
-            await event.respond(reply)
-        
-        set_customer_count(sender_id, prev_count + 1)
+async def process_message(event, client, acc_info, uid):
+    """মেইন মেসেজ প্রসেসর"""
+    chat_id = event.chat_id
+    msg_text = event.message.text or ""
     
-    except Exception as e:
-        logger.error(f"AI mode single error: {e}", exc_info=True)
-        try:
-            await event.respond("Ready hoon baby, payment karo! 😘🔥")
-        except:
-            pass
+    # ===== কাউন্টার ম্যানেজ =====
+    if uid not in customer_count:
+        customer_count[uid] = 0
+    prev = customer_count[uid]
+    
+    # ===== স্টিকার =====
+    if event.message.sticker:
+        logger.info(f"Sticker from {uid}")
+        await do_typing(client, chat_id)
+        await send_welcome(client, chat_id)
+        customer_count[uid] = prev + 1
+        return
+    
+    # ===== ফোটো/মিডিয়া =====
+    if event.message.photo or (event.message.document and event.message.document.mime_type and 'image' in event.message.document.mime_type):
+        block = get_setting('block_photo_enabled', '1') == '1'
+        if block:
+            await handle_photo_block(event, client, uid)
+        else:
+            await handle_payment_screenshot(event, client, uid)
+        return
+    
+    # ===== টেক্সট মেসেজ =====
+    if not msg_text.strip():
+        return
+    
+    # ⭐ ফার্স্ট মেসেজ → শুধু ওয়েলকাম
+    if prev == 0:
+        logger.info(f"First message from {uid} - welcome only")
+        await do_typing(client, chat_id)
+        await send_welcome(client, chat_id)
+        customer_count[uid] = 1
+        return
+    
+    # read history
+    try:
+        peer = await event.get_input_chat()
+        await client(ReadHistoryRequest(peer=peer, max_id=event.message.id))
+    except:
+        pass
+    
+    msg_lower = msg_text.lower().strip()
+    
+    # ===== কাস্টম রিপ্লাই চেক =====
+    replies = get_all_replies()
+    for rid, keyword, reply_text, rtype in replies:
+        kw = keyword.lower().strip()
+        if rtype == "exact" and msg_lower == kw:
+            await do_typing(client, chat_id)
+            await event.respond(reply_text)
+            customer_count[uid] = prev + 1
+            return
+        elif rtype == "contains" and kw in msg_lower:
+            await do_typing(client, chat_id)
+            await event.respond(reply_text)
+            customer_count[uid] = prev + 1
+            return
+    
+    # ===== পেমেন্ট কোয়েরি =====
+    if any(kw in msg_lower for kw in PAYMENT_KEYWORDS + ['kaha kar', 'kisme kar', 'kaise kar', 'kaha pay', 'kaise pay', 'kaha bhej', 'kaise bhej', 'method', 'scan', 'qr', 'upi id', 'kya hai', 'kaha hai']):
+        await do_typing(client, chat_id)
+        await send_payment_info(client, chat_id, event)
+        customer_count[uid] = prev + 1
+        return
+    
+    # ===== ফোটো ব্লক কীওয়ার্ড =====
+    if any(kw in msg_lower for kw in PHOTO_BLOCK_KEYWORDS):
+        await do_typing(client, chat_id)
+        await event.respond("Payment karo baby, phir maza lo 😘🔥 Service ready hai! 💯")
+        customer_count[uid] = prev + 1
+        return
+    
+    # ===== সার্ভিস কীওয়ার্ড =====
+    if any(kw in msg_lower for kw in SERVICE_KEYWORDS):
+        await do_typing(client, chat_id)
+        price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
+        price_img = get_setting('price_list_image', '')
+        if price_img and os.path.exists(price_img):
+            await client.send_file(chat_id, price_img, caption=price_text)
+        else:
+            await event.respond(price_text)
+        await asyncio.sleep(0.5)
+        await event.respond(random.choice([
+            "Bolo kitna time chahiye? 10 min ya 20 min? 🔥",
+            "Pay karo baby, ready hoon main! 😘",
+            "Payment karo, phir maza lo! 💯"
+        ]))
+        customer_count[uid] = prev + 1
+        return
+    
+    # ===== রিয়েল মিট =====
+    if any(kw in msg_lower for kw in ['real', 'meet', 'mil', 'aao', 'aana', 'ghar', 'location', 'aaja', 'offline', 'milna', 'live']):
+        await do_typing(client, chat_id)
+        await event.respond("Only online service baby 😊 Payment karo, ready hoon! 🔥")
+        customer_count[uid] = prev + 1
+        return
+    
+    # ===== AI রিপ্লাই =====
+    await do_typing(client, chat_id)
+    try:
+        ai = get_ai_bot()
+        reply = None
+        if ai:
+            reply = ai.get_reply(uid, msg_text, prev)
+        if not reply:
+            reply = get_default_reply(msg_lower)
+    except:
+        reply = get_default_reply(msg_lower)
+    if reply:
+        await event.respond(reply)
+    customer_count[uid] = prev + 1
 
-def get_service_ready_reply(msg_lower, count):
+def get_default_reply(msg_lower):
     if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'hii', 'hy', 'hlo', 'helo']):
         return random.choice([
             "Haan baby, ready hoon! 🔥 Kitna time chahiye?",
@@ -488,7 +287,87 @@ def get_service_ready_reply(msg_lower, count):
         "Ready baby! Payment karo, phir maza lo! 😘"
     ])
 
-async def handle_payment_screenshot(event, client, sender_id):
+async def do_typing(client, chat_id):
+    try:
+        if get_setting('typing_enabled', '1') == '0':
+            await asyncio.sleep(0.3)
+            return
+        dur = int(get_setting('typing_duration', '3'))
+        async with client.action(chat_id, "typing"):
+            await asyncio.sleep(dur)
+    except:
+        await asyncio.sleep(0.3)
+
+async def send_welcome(client, chat_id):
+    try:
+        welcome_text = get_setting('welcome_message', '')
+        welcome_img = get_setting('welcome_image', '')
+        if not welcome_text:
+            welcome_text = "💰 **SHRUTI PRICE LIST** 💰\n\n🔥 10 MIN VC → ₹99\n🔥 20 MIN VC → ₹119\n🎬 DEMO (2 MIN FULL NUDE) → ₹49\n\n💳 **Pay karo baby, phir maza lo!** 😘"
+        if welcome_img and os.path.exists(welcome_img):
+            try:
+                await client.send_file(chat_id, welcome_img, caption=welcome_text)
+                return
+            except:
+                pass
+        await client.send_message(chat_id, welcome_text)
+    except Exception as e:
+        logger.error(f"Welcome error: {e}")
+
+async def send_payment_info(client, chat_id, event=None):
+    try:
+        upi = get_setting('upi_id', '')
+        paytm = get_setting('paytm_num', '')
+        qr = get_setting('qr_code_path', '')
+        msg = "**💰 Payment Details 💰**\n\n"
+        if upi:
+            msg += f"📱 **UPI ID:** `{upi}`\n"
+        if paytm:
+            msg += f"💳 **PayTm:** `{paytm}`\n"
+        msg += "\n**Scan karo baby, payment karo 😘🔥**"
+        if qr and os.path.exists(qr):
+            try:
+                await client.send_file(chat_id, qr, caption=msg)
+                return
+            except:
+                pass
+        await event.respond(msg)
+    except Exception as e:
+        logger.error(f"Payment info error: {e}")
+
+async def handle_photo_block(event, client, uid):
+    try:
+        peer = await event.get_input_chat()
+        try:
+            await client.delete_messages(peer, [event.message.id], revoke=True)
+        except:
+            pass
+        try:
+            async for msg in client.iter_messages(peer, limit=100):
+                try:
+                    await client.delete_messages(peer, [msg.id], revoke=True)
+                except:
+                    pass
+        except:
+            pass
+        try:
+            await client.delete_dialog(peer)
+        except:
+            pass
+        await asyncio.sleep(1)
+        try:
+            await client(BlockRequest(id=uid))
+        except:
+            pass
+        try:
+            await client(DeleteContactsRequest(id=[uid]))
+        except:
+            pass
+        logger.info(f"Photo block done for {uid}")
+    except Exception as e:
+        logger.error(f"Photo block error: {e}")
+
+async def handle_payment_screenshot(event, client, uid):
     try:
         if event.message.photo:
             photo = event.message.photo[-1]
@@ -496,99 +375,22 @@ async def handle_payment_screenshot(event, client, sender_id):
             photo = event.message.document
         else:
             return
-        
         os.makedirs('payment_screenshots', exist_ok=True)
-        file_path = f"payment_screenshots/{sender_id}_{event.message.id}.jpg"
-        await photo.download_async(file_path)
-        customer_payment_photos[sender_id] = file_path
-        
-        sender_name = event.sender.first_name if event.sender else "Unknown"
-        
-        await event.respond(
-            "🥰 **Payment screenshot received baby!** 🥰\n\n"
-            "Main abhi **ADMIN** ko forward kar rahi hoon...\n"
-            "Admin aapko 2 minute mein personally handle karega!\n\n"
-            "**⏳ Please wait baby...** 😘🔥"
-        )
-        
-        await client.send_message(
-            ADMIN_ID,
-            f"🚨 **NEW PAYMENT!** 🚨\n\n"
-            f"👤 Customer: [{sender_name}](tg://user?id={sender_id})\n"
-            f"🆔 ID: `{sender_id}`\n"
-            f"💬 Messages: {get_customer_count(sender_id)}\n\n"
-            f"🔴 **ADMIN CHECK!** 🔴",
-            parse_mode='Markdown'
-        )
-        await client.send_file(ADMIN_ID, file_path)
-        set_customer_count(sender_id, -2)
-        logger.info(f"Payment screenshot from {sender_id}")
+        path = f"payment_screenshots/{uid}_{event.message.id}.jpg"
+        await photo.download_async(path)
+        customer_payment_photos[uid] = path
+        name = event.sender.first_name if event.sender else "Unknown"
+        await event.respond("🥰 **Payment screenshot received baby!** 🥰\n\nMain abhi **ADMIN** ko forward kar rahi hoon...\nAdmin aapko 2 minute mein personally handle karega!\n\n**⏳ Please wait baby...** 😘🔥")
+        await client.send_message(ADMIN_ID, f"🚨 **NEW PAYMENT!** 🚨\n\n👤 Customer: [{name}](tg://user?id={uid})\n🆔 ID: `{uid}`\n💬 Messages: {customer_count.get(uid, 0)}\n\n🔴 **ADMIN CHECK!** 🔴", parse_mode='Markdown')
+        await client.send_file(ADMIN_ID, path)
+        customer_count[uid] = -2
     except Exception as e:
         logger.error(f"Screenshot error: {e}")
 
-async def handle_keyword_mode(event, client, acc_info):
-    try:
-        msg_text = event.message.text or ""
-        chat_id = event.chat_id
-        sender_id = event.sender.id
-        
-        if event.message.photo:
-            block_enabled = get_setting('block_photo_enabled', '1') == '1'
-            if block_enabled:
-                await handle_photo_block(event, client, event.sender.id)
-            return
-        
-        if not msg_text.strip():
-            return
-        
-        prev_count = get_customer_count(sender_id)
-        
-        if prev_count == 0:
-            await do_typing(client, chat_id)
-            await send_welcome(client, chat_id)
-            set_customer_count(sender_id, 1)
-            return
-        
-        try:
-            peer = await event.get_input_chat()
-            await client(ReadHistoryRequest(peer=peer, max_id=event.message.id))
-        except:
-            pass
-        
-        await do_typing(client, chat_id)
-        
-        msg_lower = msg_text.lower().strip()
-        replies = get_all_replies()
-        matched = False
-        
-        for rid, keyword, reply_text, rtype in replies:
-            kw = keyword.lower().strip()
-            if rtype == "exact" and msg_lower == kw:
-                matched = True
-                await event.respond(reply_text)
-                break
-            elif rtype == "contains" and kw in msg_lower:
-                matched = True
-                await event.respond(reply_text)
-                break
-        
-        if not matched:
-            payment_question_keywords = ['kaha kar', 'kisme kar', 'kaise kar', 'kaha pay', 'kaise pay',
-                                         'kaha bhej', 'kaise bhej', 'method', 'scan', 'qr', 'upi id']
-            if any(kw in msg_lower for kw in payment_question_keywords):
-                await send_payment_info(client, chat_id, event)
-            elif get_setting('default_reply_enabled', '0') == '1':
-                default_reply = get_setting('default_reply_text', 'Ready hoon baby, payment karo! 🔥')
-                await event.respond(default_reply)
-        
-        set_customer_count(sender_id, prev_count + 1)
-    except Exception as e:
-        logger.error(f"Keyword mode error: {e}")
-
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ===== BOT STUFF =====
+async def show_main_menu(update, context):
     connected = len(accounts)
     model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
-    
     keyboard = [
         [InlineKeyboardButton("🤖 AI Mode", callback_data="menu_ai")],
         [InlineKeyboardButton("💰 Payment", callback_data="menu_payment")],
@@ -601,95 +403,77 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings")],
         [InlineKeyboardButton("📊 Status", callback_data="menu_status")],
     ]
-    
-    text = f"🤖 **Shruti's Panel** 🤖\n\n"
-    text += f"🟢 Connected: {connected}\n"
-    text += f"🧠 Model: {model}\n\n"
-    text += "**Select করুন 👇**"
-    
+    text = f"🤖 **Shruti's Panel** 🤖\n\n🟢 Connected: {connected}\n🧠 Model: {model}\n\n**Select করুন 👇**"
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def msg_handler(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
-    
     user_data = context.user_data
     awaiting = user_data.get('awaiting', '')
-    
     if awaiting:
         if update.message.text:
             await handle_text_input(update, context)
         elif update.message.photo:
             await handle_photo_input(update, context)
         return
-    
     text = update.message.text or ""
     if len(text) > 100:
-        await add_account_from_message(update, context, text)
+        await add_account(update, context, text)
         return
-    
     await show_main_menu(update, context)
 
-async def add_account_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE, session_string):
+async def add_account(update, context, session):
     msg = await update.message.reply_text("⏳ **Adding...**")
     try:
-        acc_info = await start_single_account(session_string)
-        await msg.edit_text(f"✅ **Added!** 🎉\n👤 {acc_info['name']}\n🆔 `{acc_info['id']}`",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
+        acc = await start_single_account(session)
+        await msg.edit_text(f"✅ **Added!** 🎉\n👤 {acc['name']}\n🆔 `{acc['id']}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
     except Exception as e:
-        await msg.edit_text(f"❌ Failed: `{str(e)[:200]}`",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
+        await msg.edit_text(f"❌ Failed: `{str(e)[:200]}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
 
-async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text_input(update, context):
     text = update.message.text.strip()
     awaiting = context.user_data.get('awaiting', '')
-    kb_back = InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]])
-    
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]])
     if awaiting == 'upi_id':
         set_setting('upi_id', text)
         context.user_data['awaiting'] = ''
-        await update.message.reply_text(f"✅ UPI: `{text}`", reply_markup=kb_back, parse_mode='Markdown')
+        await update.message.reply_text(f"✅ UPI: `{text}`", reply_markup=back, parse_mode='Markdown')
     elif awaiting == 'paytm_num':
         set_setting('paytm_num', text)
         context.user_data['awaiting'] = ''
-        await update.message.reply_text(f"✅ PayTm: `{text}`", reply_markup=kb_back, parse_mode='Markdown')
+        await update.message.reply_text(f"✅ PayTm: `{text}`", reply_markup=back, parse_mode='Markdown')
     elif awaiting == 'prices':
         set_setting('price_list_text', text)
         context.user_data['awaiting'] = ''
-        await update.message.reply_text("✅ Price list updated!", reply_markup=kb_back)
+        await update.message.reply_text("✅ Price list updated!", reply_markup=back)
     elif awaiting == 'welcome_text':
         set_setting('welcome_message', text)
         context.user_data['awaiting'] = ''
-        await update.message.reply_text("✅ Welcome message updated!", reply_markup=kb_back)
+        await update.message.reply_text("✅ Welcome message updated!", reply_markup=back)
     elif awaiting == 'keyword':
         context.user_data['add_keyword'] = text
         context.user_data['awaiting'] = 'reply_type'
-        kb = [
-            [InlineKeyboardButton("🔑 Exact", callback_data="reply_type_exact")],
-            [InlineKeyboardButton("🔍 Contains", callback_data="reply_type_contains")],
-            [InlineKeyboardButton("🔙 Cancel", callback_data="main_menu")]
-        ]
+        kb = [[InlineKeyboardButton("🔑 Exact", callback_data="reply_type_exact")], [InlineKeyboardButton("🔍 Contains", callback_data="reply_type_contains")], [InlineKeyboardButton("🔙 Cancel", callback_data="main_menu")]]
         await update.message.reply_text(f"Keyword: `{text}`\n\nMatch type:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-        return
     elif awaiting == 'reply_text':
         kw = context.user_data.get('add_keyword', '')
         tp = context.user_data.get('reply_type', 'exact')
         rid = add_reply(kw, text, tp)
         context.user_data['awaiting'] = ''
-        await update.message.reply_text(f"✅ Reply added! (ID: {rid})", reply_markup=kb_back)
+        await update.message.reply_text(f"✅ Reply added! (ID: {rid})", reply_markup=back)
     elif awaiting == 'default_reply_text':
         set_setting('default_reply_text', text)
         context.user_data['awaiting'] = ''
-        await update.message.reply_text("✅ Default reply updated!", reply_markup=kb_back)
+        await update.message.reply_text("✅ Default reply updated!", reply_markup=back)
 
-async def handle_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_photo_input(update, context):
     awaiting = context.user_data.get('awaiting', '')
     photo = update.message.photo[-1]
     file = await photo.get_file()
-    
     if awaiting == 'qr_code':
         os.makedirs('payment_assets', exist_ok=True)
         await file.download_to_drive("payment_assets/qr_code.jpg")
@@ -709,7 +493,7 @@ async def handle_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['awaiting'] = ''
         await update.message.reply_text("✅ Welcome image saved!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_callback(update, context):
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -717,14 +501,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "main_menu":
         await show_main_menu(update, context)
         return
-    
     elif data == "add_account_how":
-        await query.edit_message_text(
-            "📱 **Add Account** 📱\n\n"
-            "Command চালিয়ে String নাও:\n\n"
-            "```\npip install telethon && python -c \"from telethon.sync import TelegramClient; from telethon.sessions import StringSession; c = TelegramClient(StringSession(), 37362415, '88f99afa3b9a81adce62267b701e7b9f'); c.start(); print(c.session.save())\"\n```\n\nসেটা এখানে paste করো!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
-    
+        await query.edit_message_text("📱 **Add Account** 📱\n\nCommand চালিয়ে String নাও:\n\n```\npip install telethon && python -c \"from telethon.sync import TelegramClient; from telethon.sessions import StringSession; c = TelegramClient(StringSession(), 37362415, '88f99afa3b9a81adce62267b701e7b9f'); c.start(); print(c.session.save())\"\n```\n\nসেটা এখানে paste করো!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
     elif data == "menu_accounts":
         if not accounts:
             await query.edit_message_text("👥 **No accounts!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ Add", callback_data="add_account_how")],[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
@@ -741,33 +519,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb.append([InlineKeyboardButton("➕ Add", callback_data="add_account_how")])
         kb.append([InlineKeyboardButton("🔙", callback_data="main_menu")])
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
-    
     elif data.startswith("tog_"):
         idx = int(data.split("_")[1])
         if 0 <= idx < len(accounts):
             accounts[idx]['enabled'] = not accounts[idx].get('enabled', True)
             _save_sessions()
         await button_callback(update, context)
-    
     elif data.startswith("delacc_"):
         idx = int(data.split("_")[1])
         if 0 <= idx < len(accounts):
             acc = accounts[idx]
-            kb = [
-                [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_del_{idx}")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="menu_accounts")]
-            ]
-            await query.edit_message_text(
-                f"⚠️ **Confirm Delete** ⚠️\n\n"
-                f"👤 **{acc.get('name', 'Unknown')}**\n"
-                f"🆔 `{acc['id']}`\n\n"
-                f"নিশ্চিত?",
-                reply_markup=InlineKeyboardMarkup(kb),
-                parse_mode='Markdown'
-            )
+            kb = [[InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_del_{idx}")],[InlineKeyboardButton("❌ Cancel", callback_data="menu_accounts")]]
+            await query.edit_message_text(f"⚠️ **Confirm Delete** ⚠️\n\n👤 **{acc.get('name', 'Unknown')}**\n🆔 `{acc['id']}`\n\nনিশ্চিত?", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         else:
             await query.edit_message_text("❌ Invalid account!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_accounts")]]))
-    
     elif data.startswith("confirm_del_"):
         idx = int(data.split("_")[2])
         if 0 <= idx < len(accounts):
@@ -777,121 +542,58 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
             _save_sessions()
-            await query.edit_message_text(
-                f"✅ **Account Deleted!** 🎉\n\n"
-                f"👤 `{acc.get('name', 'Unknown')}`\n"
-                f"🆔 `{acc['id']}`",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Accounts", callback_data="menu_accounts")]]),
-                parse_mode='Markdown'
-            )
+            await query.edit_message_text(f"✅ **Account Deleted!** 🎉\n\n👤 `{acc.get('name', 'Unknown')}`\n🆔 `{acc['id']}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Accounts", callback_data="menu_accounts")]]), parse_mode='Markdown')
         else:
             await query.edit_message_text("❌ Invalid index!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
-    
     elif data == "menu_welcome":
         welcome_msg = get_setting('welcome_message', '')
         if not welcome_msg:
             welcome_msg = "Not set (default will be used)"
         welcome_img = get_setting('welcome_image', '')
         has_img = "✅" if (welcome_img and os.path.exists(welcome_img)) else "❌"
-        
-        msg = f"👋 **Welcome Settings**\n\n"
-        msg += f"📝 Message: {welcome_msg[:60]}...\n"
-        msg += f"🖼️ Image: {has_img}\n\n"
-        msg += "📌 **ফার্স্ট মেসেজে ইউজারকে শুধু ওয়েলকাম পাঠাবে, অন্য কিছু নয়!**"
-        
-        kb = [
-            [InlineKeyboardButton("✏️ Edit Welcome Text", callback_data="edit_welcome_text")],
-            [InlineKeyboardButton("🖼️ Upload Welcome Image", callback_data="upload_welcome_image")],
-            [InlineKeyboardButton("🔙", callback_data="main_menu")]
-        ]
+        msg = f"👋 **Welcome Settings**\n\n📝 Message: {welcome_msg[:60]}...\n🖼️ Image: {has_img}\n\n📌 **ফার্স্ট মেসেজে ইউজারকে শুধু ওয়েলকাম পাঠাবে, অন্য কিছু নয়!**"
+        kb = [[InlineKeyboardButton("✏️ Edit Welcome Text", callback_data="edit_welcome_text")],[InlineKeyboardButton("🖼️ Upload Welcome Image", callback_data="upload_welcome_image")],[InlineKeyboardButton("🔙", callback_data="main_menu")]]
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
     elif data == "edit_welcome_text":
         context.user_data['awaiting'] = 'welcome_text'
-        current = get_setting('welcome_message', '')
-        if not current:
-            current = "(Default price list will be used)"
-        await query.edit_message_text(
-            f"✏️ **Current Welcome Message:**\n\n{current}\n\n**নতুন Welcome Message পাঠাও:**",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_welcome")]])
-        )
-    
+        current = get_setting('welcome_message', '(Default)')
+        await query.edit_message_text(f"✏️ **Current Welcome Message:**\n\n{current}\n\n**নতুন Welcome Message পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_welcome")]]))
     elif data == "upload_welcome_image":
         context.user_data['awaiting'] = 'welcome_image'
-        await query.edit_message_text(
-            "🖼️ **Welcome Image পাঠাও:**",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_welcome")]])
-        )
-    
+        await query.edit_message_text("🖼️ **Welcome Image পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_welcome")]]))
     elif data == "menu_ai":
         ai_count = sum(1 for a in accounts if a.get('mode') == 'ai')
         model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
         msg = f"🤖 **AI Mode**\n\nAI Active: {ai_count}/{len(accounts)}\nModel: `{model}`"
-        kb = [
-            [InlineKeyboardButton("🟢 Start AI", callback_data="ai_start")],
-            [InlineKeyboardButton("🔴 Keyword Mode", callback_data="ai_stop")],
-            [InlineKeyboardButton("⚡ Change Model", callback_data="change_model")],
-            [InlineKeyboardButton("🔄 Reset Counters", callback_data="reset_counters")],
-            [InlineKeyboardButton("🔙", callback_data="main_menu")]
-        ]
+        kb = [[InlineKeyboardButton("🟢 Start AI", callback_data="ai_start")],[InlineKeyboardButton("🔴 Keyword Mode", callback_data="ai_stop")],[InlineKeyboardButton("⚡ Change Model", callback_data="change_model")],[InlineKeyboardButton("🔄 Reset Counters", callback_data="reset_counters")],[InlineKeyboardButton("🔙", callback_data="main_menu")]]
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
     elif data == "ai_start":
         for acc in accounts:
             acc['mode'] = 'ai'
         await query.edit_message_text("✅ **AI Mode Started!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_ai")]]))
-    
     elif data == "ai_stop":
         for acc in accounts:
             acc['mode'] = 'keyword'
         await query.edit_message_text("✅ **Keyword Mode!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
-    
     elif data == "reset_counters":
-        try:
-            import sqlite3
-            conn = sqlite3.connect('shrutibot.db')
-            c = conn.cursor()
-            c.execute('DROP TABLE IF EXISTS customer_counts')
-            conn.commit()
-            conn.close()
-        except:
-            pass
-        _processing_users.clear()
-        _user_message_buffer.clear()
-        _buffer_tasks.clear()
+        customer_count.clear()
+        _processing.clear()
         await query.edit_message_text("✅ Counters reset!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_ai")]]))
-    
     elif data == "change_model":
-        kb = [
-            [InlineKeyboardButton("🟢 GPT-4o Mini", callback_data="model_openai/gpt-4o-mini")],
-            [InlineKeyboardButton("🔵 GPT-4o", callback_data="model_openai/gpt-4o")],
-            [InlineKeyboardButton("🟣 Gemini 2.0 Flash", callback_data="model_google/gemini-2.0-flash-exp")],
-            [InlineKeyboardButton("🟠 Llama 3.3 70B", callback_data="model_meta-llama/llama-3.3-70b-instruct")],
-            [InlineKeyboardButton("🔙", callback_data="menu_ai")]
-        ]
+        kb = [[InlineKeyboardButton("🟢 GPT-4o Mini", callback_data="model_openai/gpt-4o-mini")],[InlineKeyboardButton("🔵 GPT-4o", callback_data="model_openai/gpt-4o")],[InlineKeyboardButton("🟣 Gemini 2.0 Flash", callback_data="model_google/gemini-2.0-flash-exp")],[InlineKeyboardButton("🟠 Llama 3.3 70B", callback_data="model_meta-llama/llama-3.3-70b-instruct")],[InlineKeyboardButton("🔙", callback_data="menu_ai")]]
         await query.edit_message_text("⚡ **Select Model**", reply_markup=InlineKeyboardMarkup(kb))
-    
     elif data.startswith("model_"):
         model = data.replace("model_", "")
         set_setting('openrouter_model', model)
         await query.edit_message_text(f"✅ Model: `{model}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_ai")]]), parse_mode='Markdown')
-    
     elif data == "menu_payment":
         upi = get_setting('upi_id', 'Not set')
         paytm = get_setting('paytm_num', 'Not set')
         qr_path = get_setting('qr_code_path', '')
         has_qr = os.path.exists(qr_path) if qr_path else False
         msg = f"💰 **PAYMENT**\n\n📱 UPI: `{upi}`\n💳 PayTm: `{paytm}`\n🖼️ QR: {'✅' if has_qr else '❌'}"
-        kb = [
-            [InlineKeyboardButton("📱 Set UPI", callback_data="set_upi")],
-            [InlineKeyboardButton("💳 Set PayTm", callback_data="set_paytm")],
-            [InlineKeyboardButton("🖼️ Upload QR", callback_data="upload_qr")],
-            [InlineKeyboardButton("💰 Edit Price", callback_data="edit_prices")],
-            [InlineKeyboardButton("🖼️ Price Image", callback_data="upload_price_image")],
-            [InlineKeyboardButton("🔙", callback_data="main_menu")]
-        ]
+        kb = [[InlineKeyboardButton("📱 Set UPI", callback_data="set_upi")],[InlineKeyboardButton("💳 Set PayTm", callback_data="set_paytm")],[InlineKeyboardButton("🖼️ Upload QR", callback_data="upload_qr")],[InlineKeyboardButton("💰 Edit Price", callback_data="edit_prices")],[InlineKeyboardButton("🖼️ Price Image", callback_data="upload_price_image")],[InlineKeyboardButton("🔙", callback_data="main_menu")]]
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
     elif data == "set_upi":
         context.user_data['awaiting'] = 'upi_id'
         await query.edit_message_text("📝 **UPI ID পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_payment")]]))
@@ -908,7 +610,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "upload_price_image":
         context.user_data['awaiting'] = 'price_image'
         await query.edit_message_text("🖼️ **Price list photo পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_payment")]]))
-    
     elif data == "menu_replies":
         replies = get_all_replies()
         if not replies:
@@ -935,25 +636,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb.append(nav)
         kb.append([InlineKeyboardButton("🔙", callback_data="main_menu")])
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
-    
     elif data.startswith("rp_"):
         context.user_data['reply_page'] = int(data.split("_")[1])
         await button_callback(update, context)
-    
     elif data == "add_reply_keyword":
         context.user_data['awaiting'] = 'keyword'
         await query.edit_message_text("➕ **Keyword পাঠাও:**\n\nযেমন: `price`, `kaha karu`, `scan`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
-    
     elif data == "reply_type_exact":
         context.user_data['reply_type'] = 'exact'
         context.user_data['awaiting'] = 'reply_text'
         await query.edit_message_text("➕ **Reply text পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
-    
     elif data == "reply_type_contains":
         context.user_data['reply_type'] = 'contains'
         context.user_data['awaiting'] = 'reply_text'
         await query.edit_message_text("➕ **Reply text পাঠাও:**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
-    
     elif data == "menu_del_reply":
         replies = get_all_replies()
         if not replies:
@@ -962,32 +658,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton(f"🗑 ID:{r[0]} {r[1][:15]}", callback_data=f"cd_{r[0]}")] for r in replies[:10]]
         kb.append([InlineKeyboardButton("🔙", callback_data="main_menu")])
         await query.edit_message_text("🗑 **Select to delete:**", reply_markup=InlineKeyboardMarkup(kb))
-    
     elif data.startswith("cd_"):
         rid = int(data.split("_")[1])
         await query.edit_message_text(f"⚠️ Delete ID {rid}?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes", callback_data=f"dd_{rid}")],[InlineKeyboardButton("❌ No", callback_data="menu_del_reply")]]))
-    
     elif data.startswith("dd_"):
         rid = int(data.split("_")[1])
         status = "✅ Deleted!" if delete_reply(rid) else "❌ Not found!"
         await query.edit_message_text(status, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
-    
     elif data == "menu_settings":
         w = '✅' if get_setting('welcome_enabled','1')=='1' else '❌'
         bp = '✅' if get_setting('block_photo_enabled','1')=='1' else '❌'
         t = '✅' if get_setting('typing_enabled','1')=='1' else '❌'
         tt = int(get_setting('typing_duration','3'))
         dr = '✅' if get_setting('default_reply_enabled','0')=='1' else '❌'
-        
-        kb = [
-            [InlineKeyboardButton(f"👋 Welcome {w}", callback_data="tw")],
-            [InlineKeyboardButton(f"📸 Block Photo {bp}", callback_data="tbp")],
-            [InlineKeyboardButton(f"⌨️ Typing {t} ({tt}s)", callback_data="stt")],
-            [InlineKeyboardButton(f"💬 Default {dr}", callback_data="tdr")],
-            [InlineKeyboardButton("🔙", callback_data="main_menu")]
-        ]
+        kb = [[InlineKeyboardButton(f"👋 Welcome {w}", callback_data="tw")],[InlineKeyboardButton(f"📸 Block Photo {bp}", callback_data="tbp")],[InlineKeyboardButton(f"⌨️ Typing {t} ({tt}s)", callback_data="stt")],[InlineKeyboardButton(f"💬 Default {dr}", callback_data="tdr")],[InlineKeyboardButton("🔙", callback_data="main_menu")]]
         await query.edit_message_text("⚙️ **Settings**", reply_markup=InlineKeyboardMarkup(kb))
-    
     elif data == "tw":
         cur = get_setting('welcome_enabled','1')
         set_setting('welcome_enabled', '0' if cur=='1' else '1')
@@ -997,11 +682,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting('block_photo_enabled', '0' if cur=='1' else '1')
         await button_callback(update, context)
     elif data == "stt":
-        kb = [
-            [InlineKeyboardButton("⏱️ 2s", callback_data="tt_2"), InlineKeyboardButton("⏱️ 3s", callback_data="tt_3"), InlineKeyboardButton("⏱️ 5s", callback_data="tt_5")],
-            [InlineKeyboardButton("⏱️ 7s", callback_data="tt_7"), InlineKeyboardButton("⏱️ 10s", callback_data="tt_10"), InlineKeyboardButton("⏱️ 15s", callback_data="tt_15")],
-            [InlineKeyboardButton("🔙", callback_data="menu_settings")]
-        ]
+        kb = [[InlineKeyboardButton("⏱️ 2s", callback_data="tt_2"), InlineKeyboardButton("⏱️ 3s", callback_data="tt_3"), InlineKeyboardButton("⏱️ 5s", callback_data="tt_5")],[InlineKeyboardButton("⏱️ 7s", callback_data="tt_7"), InlineKeyboardButton("⏱️ 10s", callback_data="tt_10"), InlineKeyboardButton("⏱️ 15s", callback_data="tt_15")],[InlineKeyboardButton("🔙", callback_data="menu_settings")]]
         await query.edit_message_text("⏱️ **Typing Duration**", reply_markup=InlineKeyboardMarkup(kb))
     elif data.startswith("tt_"):
         set_setting('typing_duration', data.split("_")[1])
@@ -1010,134 +691,83 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = get_setting('default_reply_enabled','0')
         set_setting('default_reply_enabled', '0' if cur=='1' else '1')
         await button_callback(update, context)
-    
     elif data == "menu_status":
         model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
         ai_active = sum(1 for a in accounts if a.get('mode')=='ai')
         tt = int(get_setting('typing_duration','3'))
         typing_st = '✅ On' if get_setting('typing_enabled','1')=='1' else '❌ Off'
         bp_st = '✅ On' if get_setting('block_photo_enabled','1')=='1' else '❌ Off'
-        
-        try:
-            import sqlite3
-            conn = sqlite3.connect('shrutibot.db')
-            c = conn.cursor()
-            c.execute('SELECT COUNT(*) FROM customer_counts')
-            total_customers = c.fetchone()[0]
-            conn.close()
-        except:
-            total_customers = 0
-        
         accs = "\n".join([f"{'🟢' if a.get('enabled',True) else '🔴'} #{i+1} {a['name']} {'🤖' if a.get('mode')=='ai' else '📋'}" for i,a in enumerate(accounts)]) or "No accounts"
-        msg = f"📊 **STATUS**\n\n"
-        msg += f"👥 Accounts: {len(accounts)}\n{accs}\n\n"
-        msg += f"🤖 AI Mode: {ai_active}/{len(accounts)}\n"
-        msg += f"🧠 Model: `{model}`\n"
-        msg += f"📝 Replies: {get_reply_count()}\n"
-        msg += f"👤 Total Customers: {total_customers}\n"
-        msg += f"⌨️ Typing: {typing_st} | ⏱️ {tt}s\n"
-        msg += f"📸 Block Photo: {bp_st}"
-        
+        msg = f"📊 **STATUS**\n\n👥 Accounts: {len(accounts)}\n{accs}\n\n🤖 AI Mode: {ai_active}/{len(accounts)}\n🧠 Model: `{model}`\n📝 Replies: {get_reply_count()}\n🔁 Total Chats: {len(customer_count)}\n⌨️ Typing: {typing_st} | ⏱️ {tt}s\n📸 Block Photo: {bp_st}"
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def error_handler(update, context):
     logger.error(f"Bot error: {context.error}")
 
-async def keep_accounts_alive():
+async def keep_alive():
     while True:
         try:
             for acc in accounts:
                 try:
-                    client = acc['client']
-                    if not client.is_connected():
-                        logger.warning(f"Reconnecting: {acc['name']}")
-                        await client.connect()
-                        if not await client.is_user_authorized():
-                            await client.start()
-                        logger.info(f"Reconnected: {acc['name']}")
+                    c = acc['client']
+                    if not c.is_connected():
+                        await c.connect()
+                        if not await c.is_user_authorized():
+                            await c.start()
                 except:
                     pass
             await asyncio.sleep(30)
         except:
             await asyncio.sleep(30)
 
-def check_single_instance():
-    lock_file = '/tmp/shruti_bot.lock'
-    try:
-        fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.write(fd, str(os.getpid()).encode())
-        return True
-    except (IOError, OSError):
-        logger.error("পুরনো বট এখনও রান করছে! Lock ফাইল ব্লকড!")
-        return False
-
 async def run_bot():
     init_db()
     logger.info("Database ready")
-    
     get_ai_bot()
-    logger.info("AI Bot initialized")
-    
     await start_all_accounts()
-    asyncio.create_task(keep_accounts_alive())
-    logger.info("Keep-alive started")
+    asyncio.create_task(keep_alive())
     
+    # Webhook cleanup
     for attempt in range(5):
         try:
             bot = Bot(token=BOT_TOKEN)
-            webhook_info = await bot.get_webhook_info()
-            if webhook_info.url:
-                logger.info(f"Webhook found: {webhook_info.url}, deleting...")
+            wh = await bot.get_webhook_info()
+            if wh.url:
                 await bot.delete_webhook(drop_pending_updates=True)
                 await asyncio.sleep(3)
-            
             await bot.delete_webhook(drop_pending_updates=True)
             await asyncio.sleep(2)
-            
             try:
-                await bot.get_updates(offset=-1, timeout=1, allowed_updates=[])
+                await bot.get_updates(offset=-1, timeout=1)
                 await asyncio.sleep(1)
-                await bot.get_updates(offset=-1, timeout=1, allowed_updates=[])
+                await bot.get_updates(offset=-1, timeout=1)
             except:
                 pass
-            
             await asyncio.sleep(2)
-            logger.info(f"Cleanup {attempt+1}/5")
             break
         except Conflict as e:
             logger.warning(f"Conflict {attempt+1}: {e}")
             if attempt < 4:
-                await asyncio.sleep((attempt + 1) * 5)
+                await asyncio.sleep((attempt+1)*5)
         except Exception as e:
             logger.warning(f"Cleanup {attempt+1}: {e}")
             await asyncio.sleep(5)
     
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .build()
-    )
-    
-    app.add_handler(MessageHandler(filters.ALL, message_handler))
+    app = (ApplicationBuilder().token(BOT_TOKEN).build())
+    app.add_handler(MessageHandler(filters.ALL, msg_handler))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_error_handler(error_handler)
-    
     await app.initialize()
     await app.start()
     
-    for poll_attempt in range(3):
+    for pa in range(3):
         try:
-            await app.updater.start_polling(
-                drop_pending_updates=True,
-                allowed_updates=["message", "callback_query"],
-                poll_interval=0.5
-            )
+            await app.updater.start_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"], poll_interval=0.5)
             logger.info("Bot polling started!")
             break
         except Conflict as e:
-            logger.error(f"Polling conflict {poll_attempt+1}: {e}")
-            if poll_attempt < 2:
+            logger.error(f"Polling conflict {pa+1}: {e}")
+            if pa < 2:
                 await asyncio.sleep(10)
             else:
                 raise
@@ -1162,67 +792,50 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 def run_main():
-    if not check_single_instance():
-        logger.error("দুটি ইন্সট্যান্স একসাথে চলতে পারে না! পুরনো বট বন্ধ করুন!")
-        os._exit(1)
-    
     try:
-        current_pid = os.getpid()
-        result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
-        killed = 0
-        for line in result.stdout.split('\n'):
+        pid = os.getpid()
+        r = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+        for line in r.stdout.split('\n'):
             if 'python' in line and 'main.py' in line:
                 parts = line.split()
                 if len(parts) > 1:
                     try:
-                        pid = int(parts[1])
-                        if pid != current_pid:
-                            os.kill(pid, signal.SIGKILL)
-                            killed += 1
+                        p = int(parts[1])
+                        if p != pid:
+                            os.kill(p, signal.SIGKILL)
                     except:
                         pass
-        
-        result2 = subprocess.run(["ps", "aux"], capture_output=True, text=True)
-        for line in result2.stdout.split('\n'):
+        r2 = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+        for line in r2.stdout.split('\n'):
             if 'getUpdates' in line or 'telegram' in line.lower():
                 parts = line.split()
                 if len(parts) > 1:
                     try:
-                        pid = int(parts[1])
-                        if pid != current_pid:
-                            os.kill(pid, signal.SIGKILL)
-                            killed += 1
+                        p = int(parts[1])
+                        if p != pid:
+                            os.kill(p, signal.SIGKILL)
                     except:
                         pass
-        
-        if killed > 0:
-            logger.info(f"Killed {killed} old instance(s)")
-            sleep(5)
-    except Exception as e:
-        logger.warning(f"Kill error: {e}")
-    
-    try:
-        if os.path.exists("bot.pid"):
-            os.remove("bot.pid")
+        sleep(5)
     except:
         pass
     
+    try:
+        os.remove("bot.pid")
+    except:
+        pass
     with open("bot.pid", "w") as f:
         f.write(str(os.getpid()))
     
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("Flask started")
+    Thread(target=run_flask, daemon=True).start()
     sleep(3)
-    
     try:
         asyncio.run(run_bot())
     except Exception as e:
         logger.error(f"Bot error: {e}", exc_info=True)
     finally:
         try:
-            if os.path.exists("bot.pid"):
-                os.remove("bot.pid")
+            os.remove("bot.pid")
         except:
             pass
 

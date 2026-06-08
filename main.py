@@ -46,11 +46,9 @@ accounts = []
 _welcomed_chats = set()
 customer_message_count = {}
 customer_payment_photos = {}
-# 🔒 Processing lock to prevent parallel handlers
 _processing_users = set()
 SESSION_FILE = "saved_sessions.json"
 
-# 📦 Batch processing buffer
 _user_message_buffer = {}
 _buffer_tasks = {}
 
@@ -69,7 +67,7 @@ SERVICE_KEYWORDS = ['service', 'servic', 'survice', 'sarvice', 'lena hai', 'chah
 PAYMENT_KEYWORDS = ['pay', 'payment', 'qr', 'scan', 'upi', 'paytm', 'phonepe', 'gpay', 
                     'google pay', 'kaha', 'kaise', 'account', 'bank', 'send', 'bhejo',
                     'screenshot', 'payment kar', 'pay karo', 'kaise pay', 'method', 'transfer',
-                    'rupees', 'rs', '₹', 'dham', 'send karo', 'money', 'paise', 'payment method',
+                    'rupees', 'rs', '.', 'dham', 'send karo', 'money', 'paise', 'payment method',
                     'payment kaise', 'kaha karu']
 
 PHOTO_BLOCK_KEYWORDS = ['pic', 'pics', 'picture', 'photo', 'image', 'nude pic', 'nude photo',
@@ -77,7 +75,6 @@ PHOTO_BLOCK_KEYWORDS = ['pic', 'pics', 'picture', 'photo', 'image', 'nude pic', 
                         'nangi', 'boob', 'boobs', 'dikha', 'mms', 'xnxx', 'xxx',
                         'nude video', 'sex video', 'blue film', 'bf', 'xxx video']
 
-# Shruti AI bot instance
 shruti_bot = None
 
 def get_ai_bot():
@@ -85,14 +82,12 @@ def get_ai_bot():
     if shruti_bot is None:
         try:
             shruti_bot = ShrutiAIBot()
-            logger.info("✅ Shruti AI Bot initialized")
+            logger.info("Shruti AI Bot initialized")
         except Exception as e:
-            logger.error(f"❌ Failed to init AI bot: {e}")
+            logger.error(f"Failed to init AI bot: {e}")
     return shruti_bot
 
-# ===== DATABASE CUSTOMER COUNT FUNCTIONS =====
 def set_customer_count(user_id, count):
-    """ডাটাবেসে কাস্টমার মেসেজ কাউন্ট সেভ করে"""
     try:
         import sqlite3
         conn = sqlite3.connect('shrutibot.db')
@@ -106,7 +101,6 @@ def set_customer_count(user_id, count):
         logger.error(f"set_customer_count error: {e}")
 
 def get_customer_count(user_id):
-    """ডাটাবেস থেকে কাস্টমার মেসেজ কাউন্ট পড়ে"""
     try:
         import sqlite3
         conn = sqlite3.connect('shrutibot.db')
@@ -121,7 +115,6 @@ def get_customer_count(user_id):
         logger.error(f"get_customer_count error: {e}")
         return 0
 
-# ===== SESSION MANAGEMENT =====
 def _save_sessions():
     sessions = [acc['session'] for acc in accounts if 'session' in acc and acc['session']]
     try:
@@ -139,7 +132,6 @@ def _load_sessions():
         logger.error(f"Session load error: {e}")
     return []
 
-# ===== ACCOUNT MANAGEMENT =====
 async def start_single_account(session_string):
     try:
         client = TelegramClient(StringSession(session_string), API_ID, API_HASH, sequential_updates=True)
@@ -157,27 +149,25 @@ async def start_single_account(session_string):
         accounts.append(acc_info)
         _register_handler(client, acc_info)
         _save_sessions()
-        logger.info(f"✅ Connected: {me.first_name} (ID: {me.id})")
+        logger.info(f"Connected: {me.first_name} (ID: {me.id})")
         return acc_info
     except Exception as e:
-        logger.error(f"❌ Account failed: {e}")
+        logger.error(f"Account failed: {e}")
         return None
 
 async def start_all_accounts():
     saved_sessions = _load_sessions()
     if saved_sessions:
-        logger.info(f"🔄 Starting {len(saved_sessions)} saved accounts...")
+        logger.info(f"Starting {len(saved_sessions)} saved accounts...")
         for session in saved_sessions:
             try:
                 await start_single_account(session)
                 await asyncio.sleep(2)
             except Exception as e:
                 logger.error(f"Account start error: {e}")
-    logger.info(f"✅ {len(accounts)} accounts connected!")
+    logger.info(f"{len(accounts)} accounts connected!")
 
 def _register_handler(client, acc_info):
-    """ইভেন্ট হ্যান্ডলার রেজিস্টার করে — ব্যাচ প্রসেসিং সহ"""
-    
     @client.on(events.NewMessage(incoming=True))
     async def auto_reply_handler(event):
         try:
@@ -193,12 +183,10 @@ def _register_handler(client, acc_info):
             if not acc_info.get('enabled', True):
                 return
             
-            # 🔒 LOCK
             if sender_id in _processing_users:
-                logger.info(f"⏳ {sender_id} already processing, skipping")
+                logger.info(f"{sender_id} already processing, skipping")
                 return
             
-            # স্টিকার / ফোটো / ডকুমেন্ট — সরাসরি হ্যান্ডেল করো
             if event.message.sticker or event.message.photo or (event.message.document and event.message.document.mime_type and 'image' in event.message.document.mime_type):
                 _processing_users.add(sender_id)
                 try:
@@ -207,43 +195,35 @@ def _register_handler(client, acc_info):
                     _processing_users.discard(sender_id)
                 return
             
-            # টেক্সট মেসেজ — ব্যাচ প্রসেসিং
             if not (event.message.text or "").strip():
                 return
             
-            # 📦 বাফারে মেসেজ যোগ করো
             if sender_id not in _user_message_buffer:
                 _user_message_buffer[sender_id] = []
             _user_message_buffer[sender_id].append((event, time.time()))
             
-            # যদি ইতিমধ্যে টাস্ক চলছে, তাহলে নতুন শুরু করো না
             if sender_id in _buffer_tasks:
                 return
             
-            # 🔥 ২ সেকেন্ড অপেক্ষা করে ব্যাচ প্রসেস করো
             async def process_buffer(uid):
                 await asyncio.sleep(2)
                 _processing_users.add(uid)
                 try:
-                    # বাফার থেকে সব মেসেজ নাও
                     messages = _user_message_buffer.pop(uid, [])
                     if not messages:
                         return
                     
-                    logger.info(f"📦 Processing {len(messages)} message(s) from {uid}")
+                    logger.info(f"Processing {len(messages)} message(s) from {uid}")
                     
-                    # প্রথম মেসেজ চেক করো
                     prev_count = get_customer_count(uid)
                     
                     if prev_count == 0:
-                        # ⭐ ফার্স্ট মেসেজ — শুধু ওয়েলকাম
                         first_event = messages[0][0]
                         await do_typing(client, first_event.chat_id)
                         await send_welcome(client, first_event.chat_id)
                         set_customer_count(uid, 1)
-                        logger.info(f"👋 Welcome sent to {uid} (batched)")
+                        logger.info(f"Welcome sent to {uid} (batched)")
                     else:
-                        # ⭐ ২য় মেসেজ থেকে — শুধু শেষ মেসেজের জন্য ১টা রিপ্লাই
                         last_event = messages[-1][0]
                         mode = acc_info.get('mode', 'ai')
                         if mode == 'keyword':
@@ -263,15 +243,12 @@ def _register_handler(client, acc_info):
             if sender_id in _buffer_tasks:
                 del _buffer_tasks[sender_id]
 
-# ===== MEDIA MESSAGES HANDLER =====
 async def handle_media_messages(event, client, acc_info, sender_id):
-    """স্টিকার, ফোটো, ডকুমেন্ট সরাসরি হ্যান্ডেল করে"""
     try:
         chat_id = event.chat_id
         
-        # স্টিকার
         if event.message.sticker:
-            logger.info(f"🎴 Sticker from {sender_id}")
+            logger.info(f"Sticker from {sender_id}")
             prev_count = get_customer_count(sender_id)
             if prev_count == 0:
                 await do_typing(client, chat_id)
@@ -279,7 +256,6 @@ async def handle_media_messages(event, client, acc_info, sender_id):
                 set_customer_count(sender_id, 1)
             return
         
-        # ফোটো / ইমেজ ডকুমেন্ট
         if event.message.photo or (event.message.document and event.message.document.mime_type and 'image' in event.message.document.mime_type):
             block_enabled = get_setting('block_photo_enabled', '1') == '1'
             if block_enabled:
@@ -290,23 +266,19 @@ async def handle_media_messages(event, client, acc_info, sender_id):
     except Exception as e:
         logger.error(f"Media handler error: {e}")
 
-# ===== TYPING HELPER =====
 async def do_typing(client, chat_id):
     try:
         typing_enabled = get_setting('typing_enabled', '1') == '1'
         if not typing_enabled:
             await asyncio.sleep(0.3)
             return
-        
         typing_duration = int(get_setting('typing_duration', '3'))
-        
         async with client.action(chat_id, "typing"):
             await asyncio.sleep(typing_duration)
     except Exception as e:
         logger.error(f"Typing error: {e}")
         await asyncio.sleep(0.3)
 
-# ===== SEND PAYMENT QR HELPER =====
 async def send_payment_info(client, chat_id, event=None):
     try:
         upi_id = get_setting('upi_id', '')
@@ -325,7 +297,7 @@ async def send_payment_info(client, chat_id, event=None):
         if qr_exists:
             try:
                 await client.send_file(chat_id, qr_path, caption=payment_msg)
-                logger.info(f"✅ QR sent to {chat_id}")
+                logger.info(f"QR sent to {chat_id}")
                 return
             except Exception as e:
                 logger.error(f"QR send error: {e}")
@@ -333,21 +305,16 @@ async def send_payment_info(client, chat_id, event=None):
         else:
             full_msg = payment_msg + "\n\n⚠️ **QR code set nahi hai! Admin se set karwao**"
             await event.respond(full_msg)
-            
     except Exception as e:
         logger.error(f"Payment info error: {e}")
 
-# ===== PHOTO BLOCK HANDLER =====
 async def handle_photo_block(event, client, sender_id):
     try:
-        logger.info(f"📸 Photo block initiated for {sender_id}")
-        
+        logger.info(f"Photo block initiated for {sender_id}")
         peer = await event.get_input_chat()
-        chat_id = event.chat_id
         
         try:
             await client.delete_messages(peer, [event.message.id], revoke=True)
-            logger.info(f"✅ Photo message deleted for {sender_id}")
         except Exception as e:
             logger.error(f"Delete photo msg error: {e}")
         
@@ -357,39 +324,33 @@ async def handle_photo_block(event, client, sender_id):
                     await client.delete_messages(peer, [msg.id], revoke=True)
                 except:
                     pass
-            logger.info(f"✅ Chat history cleared for {sender_id}")
         except Exception as e:
-            logger.warning(f"⚠️ Could not delete all messages: {e}")
+            logger.warning(f"Could not delete all messages: {e}")
         
         try:
             await client.delete_dialog(peer)
-            logger.info(f"✅ Entire dialog deleted for {sender_id}")
         except Exception as e:
-            logger.warning(f"⚠️ Dialog delete error: {e}")
+            logger.warning(f"Dialog delete error: {e}")
         
         await asyncio.sleep(1)
         
         try:
             await client(BlockRequest(id=sender_id))
-            logger.info(f"✅ User {sender_id} blocked!")
         except Exception as e:
             logger.error(f"Block error: {e}")
         
         try:
             await client(DeleteContactsRequest(id=[sender_id]))
-            logger.info(f"✅ User {sender_id} removed from contacts")
         except:
             pass
         
-        logger.info(f"✅ Photo block COMPLETE for {sender_id}")
+        logger.info(f"Photo block COMPLETE for {sender_id}")
         return True
     except Exception as e:
         logger.error(f"Photo block error: {e}")
         return False
 
-# ===== WELCOME MESSAGE SENDER =====
 async def send_welcome(client, chat_id):
-    """পাঠাবে ওয়েলকাম মেসেজ + ফোটো (যদি সেট করা থাকে)"""
     try:
         welcome_text = get_setting('welcome_message', '')
         welcome_image = get_setting('welcome_image', '')
@@ -400,19 +361,15 @@ async def send_welcome(client, chat_id):
         if welcome_image and os.path.exists(welcome_image):
             try:
                 await client.send_file(chat_id, welcome_image, caption=welcome_text)
-                logger.info(f"✅ Welcome with image sent to {chat_id}")
                 return
             except:
                 pass
         
         await client.send_message(chat_id, welcome_text)
-        logger.info(f"✅ Welcome message sent to {chat_id}")
     except Exception as e:
         logger.error(f"Welcome send error: {e}")
 
-# ===== AI MODE SINGLE MESSAGE (ব্যাচ প্রসেসিং থেকে কল হয়) =====
 async def handle_ai_mode_single(event, client, acc_info, sender_id):
-    """শুধুমাত্র ১টা মেসেজ প্রসেস করে — ব্যাচ প্রসেসিং থেকে কল হবে"""
     try:
         msg_text = event.message.text or ""
         chat_id = event.chat_id
@@ -420,7 +377,6 @@ async def handle_ai_mode_single(event, client, acc_info, sender_id):
         if not msg_text.strip():
             return
         
-        # read history
         try:
             peer = await event.get_input_chat()
             await client(ReadHistoryRequest(peer=peer, max_id=event.message.id))
@@ -429,13 +385,11 @@ async def handle_ai_mode_single(event, client, acc_info, sender_id):
         
         msg_lower = msg_text.lower().strip()
         
-        # ডাটাবেস থেকে কাউন্টার নাও (ইতিমধ্যে ১ এর বেশি হবে)
         prev_count = get_customer_count(sender_id)
         if prev_count == 0:
             set_customer_count(sender_id, 1)
             prev_count = 1
         
-        # ===== CUSTOM REPLIES CHECK =====
         replies = get_all_replies()
         custom_match = None
         
@@ -443,11 +397,9 @@ async def handle_ai_mode_single(event, client, acc_info, sender_id):
             kw = keyword.lower().strip()
             if rtype == "exact" and msg_lower == kw:
                 custom_match = reply_text
-                logger.info(f"✅ Custom reply matched (exact): '{kw}'")
                 break
             elif rtype == "contains" and kw in msg_lower:
                 custom_match = reply_text
-                logger.info(f"✅ Custom reply matched (contains): '{kw}'")
                 break
         
         if custom_match:
@@ -456,26 +408,22 @@ async def handle_ai_mode_single(event, client, acc_info, sender_id):
             set_customer_count(sender_id, prev_count + 1)
             return
         
-        # ===== PAYMENT QUESTION CHECK =====
         is_payment = any(kw in msg_lower for kw in PAYMENT_KEYWORDS + ['kaha kar', 'kisme kar', 'kaise kar', 'kaha pay', 'kaise pay',
                                      'kaha bhej', 'kaise bhej', 'method', 'scan', 'qr', 'upi id',
                                      'kya hai', 'kaha hai'])
         
         if is_payment:
-            logger.info(f"💰 Payment query from {sender_id}")
             await do_typing(client, chat_id)
             await send_payment_info(client, chat_id, event)
             set_customer_count(sender_id, prev_count + 1)
             return
         
-        # ===== PHOTO BLOCK KEYWORDS (TEXT) =====
         if any(kw in msg_lower for kw in PHOTO_BLOCK_KEYWORDS):
             await do_typing(client, chat_id)
             await event.respond("Payment karo baby, phir maza lo 😘🔥 Service ready hai! 💯")
             set_customer_count(sender_id, prev_count + 1)
             return
         
-        # ===== SERVICE KEYWORDS =====
         is_service = any(kw in msg_lower for kw in SERVICE_KEYWORDS)
         if is_service:
             await do_typing(client, chat_id)
@@ -494,7 +442,6 @@ async def handle_ai_mode_single(event, client, acc_info, sender_id):
             set_customer_count(sender_id, prev_count + 1)
             return
         
-        # ===== REAL MEET CHECK =====
         meet_keywords = ['real', 'meet', 'mil', 'real meet', 'aao', 'aana', 'ghar', 'location',
                         'aaja', 'offline', 'face to face', 'real video', 'milna', 'live']
         if any(kw in msg_lower for kw in meet_keywords):
@@ -503,7 +450,6 @@ async def handle_ai_mode_single(event, client, acc_info, sender_id):
             set_customer_count(sender_id, prev_count + 1)
             return
         
-        # ===== NORMAL AI REPLY =====
         await do_typing(client, chat_id)
         try:
             ai_bot = get_ai_bot()
@@ -527,7 +473,6 @@ async def handle_ai_mode_single(event, client, acc_info, sender_id):
         except:
             pass
 
-# ===== SERVICE READY REPLY GENERATOR =====
 def get_service_ready_reply(msg_lower, count):
     if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'hii', 'hy', 'hlo', 'helo']):
         return random.choice([
@@ -543,7 +488,6 @@ def get_service_ready_reply(msg_lower, count):
         "Ready baby! Payment karo, phir maza lo! 😘"
     ])
 
-# ===== PAYMENT SCREENSHOT HANDLER =====
 async def handle_payment_screenshot(event, client, sender_id):
     try:
         if event.message.photo:
@@ -582,12 +526,10 @@ async def handle_payment_screenshot(event, client, sender_id):
     except Exception as e:
         logger.error(f"Screenshot error: {e}")
 
-# ===== KEYWORD MODE HANDLER =====
 async def handle_keyword_mode(event, client, acc_info):
     try:
         msg_text = event.message.text or ""
         chat_id = event.chat_id
-        
         sender_id = event.sender.id
         
         if event.message.photo:
@@ -601,7 +543,6 @@ async def handle_keyword_mode(event, client, acc_info):
         
         prev_count = get_customer_count(sender_id)
         
-        # প্রথম মেসেজ ওয়েলকাম
         if prev_count == 0:
             await do_typing(client, chat_id)
             await send_welcome(client, chat_id)
@@ -625,12 +566,10 @@ async def handle_keyword_mode(event, client, acc_info):
             if rtype == "exact" and msg_lower == kw:
                 matched = True
                 await event.respond(reply_text)
-                logger.info(f"✅ Keyword mode matched: {kw}")
                 break
             elif rtype == "contains" and kw in msg_lower:
                 matched = True
                 await event.respond(reply_text)
-                logger.info(f"✅ Keyword mode matched: {kw}")
                 break
         
         if not matched:
@@ -646,7 +585,6 @@ async def handle_keyword_mode(event, client, acc_info):
     except Exception as e:
         logger.error(f"Keyword mode error: {e}")
 
-# ===== ADMIN BOT HANDLERS =====
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     connected = len(accounts)
     model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
@@ -771,7 +709,6 @@ async def handle_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['awaiting'] = ''
         await update.message.reply_text("✅ Welcome image saved!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
 
-# ===== CALLBACK HANDLER =====
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -837,11 +774,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             acc = accounts.pop(idx)
             try:
                 await acc['client'].disconnect()
-                logger.info(f"🔌 Disconnected client: {acc.get('name', 'Unknown')}")
-            except Exception as e:
-                logger.warning(f"Disconnect error: {e}")
+            except:
+                pass
             _save_sessions()
-            logger.info(f"🗑 Account deleted: {acc.get('name', 'Unknown')} (ID: {acc['id']})")
             await query.edit_message_text(
                 f"✅ **Account Deleted!** 🎉\n\n"
                 f"👤 `{acc.get('name', 'Unknown')}`\n"
@@ -877,14 +812,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not current:
             current = "(Default price list will be used)"
         await query.edit_message_text(
-            f"✏️ **Current Welcome Message:**\n\n{current}\n\n**নতুন Welcome Message পাঠাও:**\n\n_খালি রাখতে চাইলে /skip লিখো_",
+            f"✏️ **Current Welcome Message:**\n\n{current}\n\n**নতুন Welcome Message পাঠাও:**",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_welcome")]])
         )
     
     elif data == "upload_welcome_image":
         context.user_data['awaiting'] = 'welcome_image'
         await query.edit_message_text(
-            "🖼️ **Welcome Image পাঠাও:**\n\nএটা প্রথম মেসেজে ফোটো হিসেবে যাবে।\n\n_এই image caption হিসেবে welcome text যাবে।_",
+            "🖼️ **Welcome Image পাঠাও:**",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_welcome")]])
         )
     
@@ -912,7 +847,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ **Keyword Mode!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
     
     elif data == "reset_counters":
-        # সব কাউন্টার রিসেট
         try:
             import sqlite3
             conn = sqlite3.connect('shrutibot.db')
@@ -1106,11 +1040,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]), parse_mode='Markdown')
 
-# ===== ERROR HANDLER =====
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Bot error: {context.error}")
 
-# ===== KEEP ALIVE =====
 async def keep_accounts_alive():
     while True:
         try:
@@ -1118,20 +1050,18 @@ async def keep_accounts_alive():
                 try:
                     client = acc['client']
                     if not client.is_connected():
-                        logger.warning(f"🔄 Reconnecting: {acc['name']}")
+                        logger.warning(f"Reconnecting: {acc['name']}")
                         await client.connect()
                         if not await client.is_user_authorized():
                             await client.start()
-                        logger.info(f"✅ Reconnected: {acc['name']}")
+                        logger.info(f"Reconnected: {acc['name']}")
                 except:
                     pass
             await asyncio.sleep(30)
         except:
             await asyncio.sleep(30)
 
-# ===== SINGLE INSTANCE CHECK =====
 def check_single_instance():
-    """একসাথে শুধু ১টা ইন্সট্যান্স চলবে"""
     lock_file = '/tmp/shruti_bot.lock'
     try:
         fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
@@ -1139,27 +1069,26 @@ def check_single_instance():
         os.write(fd, str(os.getpid()).encode())
         return True
     except (IOError, OSError):
-        logger.error("❌ পুরনো বট এখনও রান করছে! Lock ফাইল ব্লকড!")
+        logger.error("পুরনো বট এখনও রান করছে! Lock ফাইল ব্লকড!")
         return False
 
-# ===== BOT RUNNER =====
 async def run_bot():
     init_db()
-    logger.info("✅ Database ready")
+    logger.info("Database ready")
     
     get_ai_bot()
-    logger.info("✅ AI Bot initialized")
+    logger.info("AI Bot initialized")
     
     await start_all_accounts()
     asyncio.create_task(keep_accounts_alive())
-    logger.info("✅ Keep-alive started")
+    logger.info("Keep-alive started")
     
     for attempt in range(5):
         try:
             bot = Bot(token=BOT_TOKEN)
             webhook_info = await bot.get_webhook_info()
             if webhook_info.url:
-                logger.info(f"⚠️ Webhook found: {webhook_info.url}, deleting...")
+                logger.info(f"Webhook found: {webhook_info.url}, deleting...")
                 await bot.delete_webhook(drop_pending_updates=True)
                 await asyncio.sleep(3)
             
@@ -1174,14 +1103,14 @@ async def run_bot():
                 pass
             
             await asyncio.sleep(2)
-            logger.info(f"✅ Cleanup {attempt+1}/5")
+            logger.info(f"Cleanup {attempt+1}/5")
             break
         except Conflict as e:
-            logger.warning(f"⚠️ Conflict {attempt+1}: {e}")
+            logger.warning(f"Conflict {attempt+1}: {e}")
             if attempt < 4:
                 await asyncio.sleep((attempt + 1) * 5)
         except Exception as e:
-            logger.warning(f"⚠️ Cleanup {attempt+1}: {e}")
+            logger.warning(f"Cleanup {attempt+1}: {e}")
             await asyncio.sleep(5)
     
     app = (
@@ -1204,10 +1133,10 @@ async def run_bot():
                 allowed_updates=["message", "callback_query"],
                 poll_interval=0.5
             )
-            logger.info("✅ Bot polling started!")
+            logger.info("Bot polling started!")
             break
         except Conflict as e:
-            logger.error(f"❌ Polling conflict {poll_attempt+1}: {e}")
+            logger.error(f"Polling conflict {poll_attempt+1}: {e}")
             if poll_attempt < 2:
                 await asyncio.sleep(10)
             else:
@@ -1223,6 +1152,7 @@ async def run_bot():
         try:
             await app.stop()
         except:
+            pass
         try:
             await app.shutdown()
         except:
@@ -1232,12 +1162,10 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 def run_main():
-    # 🔥 সিঙ্গেল ইন্সট্যান্স চেক
     if not check_single_instance():
-        logger.error("❌ দুটি ইন্সট্যান্স একসাথে চলতে পারে না! পুরনো বট বন্ধ করুন!")
+        logger.error("দুটি ইন্সট্যান্স একসাথে চলতে পারে না! পুরনো বট বন্ধ করুন!")
         os._exit(1)
     
-    # পুরনো প্রসেস কিল করার চেষ্টা
     try:
         current_pid = os.getpid()
         result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
@@ -1268,7 +1196,7 @@ def run_main():
                         pass
         
         if killed > 0:
-            logger.info(f"🔪 Killed {killed} old instance(s)")
+            logger.info(f"Killed {killed} old instance(s)")
             sleep(5)
     except Exception as e:
         logger.warning(f"Kill error: {e}")
@@ -1284,13 +1212,13 @@ def run_main():
     
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    logger.info("✅ Flask started")
+    logger.info("Flask started")
     sleep(3)
     
     try:
         asyncio.run(run_bot())
     except Exception as e:
-        logger.error(f"❌ Bot error: {e}", exc_info=True)
+        logger.error(f"Bot error: {e}", exc_info=True)
     finally:
         try:
             if os.path.exists("bot.pid"):

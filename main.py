@@ -6,6 +6,9 @@ import random
 import shutil
 import signal
 import subprocess
+import time
+import socket
+import fcntl
 from threading import Thread
 from time import sleep
 
@@ -47,6 +50,10 @@ customer_payment_photos = {}
 _processing_users = set()
 SESSION_FILE = "saved_sessions.json"
 
+# 📦 Batch processing buffer
+_user_message_buffer = {}
+_buffer_tasks = {}
+
 DEFAULT_PRICE_LIST = """💰 **SHRUTI PRICE LIST** 💰
 
 🔥 10 MIN VC → ₹99
@@ -82,6 +89,37 @@ def get_ai_bot():
         except Exception as e:
             logger.error(f"❌ Failed to init AI bot: {e}")
     return shruti_bot
+
+# ===== DATABASE CUSTOMER COUNT FUNCTIONS =====
+def set_customer_count(user_id, count):
+    """ডাটাবেসে কাস্টমার মেসেজ কাউন্ট সেভ করে"""
+    try:
+        import sqlite3
+        conn = sqlite3.connect('shrutibot.db')
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS customer_counts 
+                     (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0)''')
+        c.execute('INSERT OR REPLACE INTO customer_counts (user_id, count) VALUES (?, ?)', (user_id, count))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"set_customer_count error: {e}")
+
+def get_customer_count(user_id):
+    """ডাটাবেস থেকে কাস্টমার মেসেজ কাউন্ট পড়ে"""
+    try:
+        import sqlite3
+        conn = sqlite3.connect('shrutibot.db')
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS customer_counts 
+                     (user_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 0)''')
+        c.execute('SELECT count FROM customer_counts WHERE user_id = ?', (user_id,))
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else 0
+    except Exception as e:
+        logger.error(f"get_customer_count error: {e}")
+        return 0
 
 # ===== SESSION MANAGEMENT =====
 def _save_sessions():
@@ -138,6 +176,8 @@ async def start_all_accounts():
     logger.info(f"✅ {len(accounts)} accounts connected!")
 
 def _register_handler(client, acc_info):
+    """ইভেন্ট হ্যান্ডলার রেজিস্টার করে — ব্যাচ প্রসেসিং সহ"""
+    
     @client.on(events.NewMessage(incoming=True))
     async def auto_reply_handler(event):
         try:
@@ -153,24 +193,102 @@ def _register_handler(client, acc_info):
             if not acc_info.get('enabled', True):
                 return
             
-            # 🔒 LOCK: prevent parallel processing for same user
+            # 🔒 LOCK
             if sender_id in _processing_users:
                 logger.info(f"⏳ {sender_id} already processing, skipping")
                 return
             
-            _processing_users.add(sender_id)
-            try:
-                mode = acc_info.get('mode', 'ai')
-                if mode == 'keyword':
-                    await handle_keyword_mode(event, client, acc_info)
-                else:
-                    await handle_ai_mode(event, client, acc_info, sender_id)
-            finally:
-                _processing_users.discard(sender_id)
-                
+            # স্টিকার / ফোটো / ডকুমেন্ট — সরাসরি হ্যান্ডেল করো
+            if event.message.sticker or event.message.photo or (event.message.document and event.message.document.mime_type and 'image' in event.message.document.mime_type):
+                _processing_users.add(sender_id)
+                try:
+                    await handle_media_messages(event, client, acc_info, sender_id)
+                finally:
+                    _processing_users.discard(sender_id)
+                return
+            
+            # টেক্সট মেসেজ — ব্যাচ প্রসেসিং
+            if not (event.message.text or "").strip():
+                return
+            
+            # 📦 বাফারে মেসেজ যোগ করো
+            if sender_id not in _user_message_buffer:
+                _user_message_buffer[sender_id] = []
+            _user_message_buffer[sender_id].append((event, time.time()))
+            
+            # যদি ইতিমধ্যে টাস্ক চলছে, তাহলে নতুন শুরু করো না
+            if sender_id in _buffer_tasks:
+                return
+            
+            # 🔥 ২ সেকেন্ড অপেক্ষা করে ব্যাচ প্রসেস করো
+            async def process_buffer(uid):
+                await asyncio.sleep(2)
+                _processing_users.add(uid)
+                try:
+                    # বাফার থেকে সব মেসেজ নাও
+                    messages = _user_message_buffer.pop(uid, [])
+                    if not messages:
+                        return
+                    
+                    logger.info(f"📦 Processing {len(messages)} message(s) from {uid}")
+                    
+                    # প্রথম মেসেজ চেক করো
+                    prev_count = get_customer_count(uid)
+                    
+                    if prev_count == 0:
+                        # ⭐ ফার্স্ট মেসেজ — শুধু ওয়েলকাম
+                        first_event = messages[0][0]
+                        await do_typing(client, first_event.chat_id)
+                        await send_welcome(client, first_event.chat_id)
+                        set_customer_count(uid, 1)
+                        logger.info(f"👋 Welcome sent to {uid} (batched)")
+                    else:
+                        # ⭐ ২য় মেসেজ থেকে — শুধু শেষ মেসেজের জন্য ১টা রিপ্লাই
+                        last_event = messages[-1][0]
+                        mode = acc_info.get('mode', 'ai')
+                        if mode == 'keyword':
+                            await handle_keyword_mode(last_event, client, acc_info)
+                        else:
+                            await handle_ai_mode_single(last_event, client, acc_info, uid)
+                finally:
+                    _processing_users.discard(uid)
+                    if uid in _buffer_tasks:
+                        del _buffer_tasks[uid]
+            
+            _buffer_tasks[sender_id] = asyncio.create_task(process_buffer(sender_id))
+        
         except Exception as e:
             logger.error(f"Handler error: {e}")
             _processing_users.discard(sender_id)
+            if sender_id in _buffer_tasks:
+                del _buffer_tasks[sender_id]
+
+# ===== MEDIA MESSAGES HANDLER =====
+async def handle_media_messages(event, client, acc_info, sender_id):
+    """স্টিকার, ফোটো, ডকুমেন্ট সরাসরি হ্যান্ডেল করে"""
+    try:
+        chat_id = event.chat_id
+        
+        # স্টিকার
+        if event.message.sticker:
+            logger.info(f"🎴 Sticker from {sender_id}")
+            prev_count = get_customer_count(sender_id)
+            if prev_count == 0:
+                await do_typing(client, chat_id)
+                await send_welcome(client, chat_id)
+                set_customer_count(sender_id, 1)
+            return
+        
+        # ফোটো / ইমেজ ডকুমেন্ট
+        if event.message.photo or (event.message.document and event.message.document.mime_type and 'image' in event.message.document.mime_type):
+            block_enabled = get_setting('block_photo_enabled', '1') == '1'
+            if block_enabled:
+                await handle_photo_block(event, client, sender_id)
+            else:
+                await handle_payment_screenshot(event, client, sender_id)
+            return
+    except Exception as e:
+        logger.error(f"Media handler error: {e}")
 
 # ===== TYPING HELPER =====
 async def do_typing(client, chat_id):
@@ -292,44 +410,14 @@ async def send_welcome(client, chat_id):
     except Exception as e:
         logger.error(f"Welcome send error: {e}")
 
-# ===== AI MODE (FIXED) =====
-async def handle_ai_mode(event, client, acc_info, sender_id):
+# ===== AI MODE SINGLE MESSAGE (ব্যাচ প্রসেসিং থেকে কল হয়) =====
+async def handle_ai_mode_single(event, client, acc_info, sender_id):
+    """শুধুমাত্র ১টা মেসেজ প্রসেস করে — ব্যাচ প্রসেসিং থেকে কল হবে"""
     try:
         msg_text = event.message.text or ""
         chat_id = event.chat_id
         
-        # ===== STICKER HANDLER =====
-        if event.message.sticker:
-            logger.info(f"🎴 Sticker from {sender_id}")
-            if sender_id not in customer_message_count:
-                customer_message_count[sender_id] = 0
-            await do_typing(client, chat_id)
-            await send_welcome(client, chat_id)
-            customer_message_count[sender_id] = customer_message_count.get(sender_id, 0) + 1
-            return
-        
-        # ===== PHOTO/MEDIA HANDLER =====
-        if event.message.photo or (event.message.document and event.message.document.mime_type and 'image' in event.message.document.mime_type):
-            block_enabled = get_setting('block_photo_enabled', '1') == '1'
-            if block_enabled:
-                await handle_photo_block(event, client, sender_id)
-            else:
-                await handle_payment_screenshot(event, client, sender_id)
-            return
-        
-        # ===== TEXT MESSAGE =====
         if not msg_text.strip():
-            return
-        
-        # ট্র্যাক
-        prev_count = customer_message_count.get(sender_id, 0)
-        
-        # ⭐ FIRST MESSAGE (prev_count == 0) → শুধু ওয়েলকাম
-        if prev_count == 0:
-            logger.info(f"👋 First message from {sender_id} - sending welcome only")
-            await do_typing(client, chat_id)
-            await send_welcome(client, chat_id)
-            customer_message_count[sender_id] = 1
             return
         
         # read history
@@ -340,6 +428,12 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
             pass
         
         msg_lower = msg_text.lower().strip()
+        
+        # ডাটাবেস থেকে কাউন্টার নাও (ইতিমধ্যে ১ এর বেশি হবে)
+        prev_count = get_customer_count(sender_id)
+        if prev_count == 0:
+            set_customer_count(sender_id, 1)
+            prev_count = 1
         
         # ===== CUSTOM REPLIES CHECK =====
         replies = get_all_replies()
@@ -359,7 +453,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         if custom_match:
             await do_typing(client, chat_id)
             await event.respond(custom_match)
-            customer_message_count[sender_id] = prev_count + 1
+            set_customer_count(sender_id, prev_count + 1)
             return
         
         # ===== PAYMENT QUESTION CHECK =====
@@ -371,14 +465,14 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
             logger.info(f"💰 Payment query from {sender_id}")
             await do_typing(client, chat_id)
             await send_payment_info(client, chat_id, event)
-            customer_message_count[sender_id] = prev_count + 1
+            set_customer_count(sender_id, prev_count + 1)
             return
         
         # ===== PHOTO BLOCK KEYWORDS (TEXT) =====
         if any(kw in msg_lower for kw in PHOTO_BLOCK_KEYWORDS):
             await do_typing(client, chat_id)
             await event.respond("Payment karo baby, phir maza lo 😘🔥 Service ready hai! 💯")
-            customer_message_count[sender_id] = prev_count + 1
+            set_customer_count(sender_id, prev_count + 1)
             return
         
         # ===== SERVICE KEYWORDS =====
@@ -397,7 +491,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
                 "Pay karo baby, ready hoon main! 😘",
                 "Payment karo, phir maza lo! 💯"
             ]))
-            customer_message_count[sender_id] = prev_count + 1
+            set_customer_count(sender_id, prev_count + 1)
             return
         
         # ===== REAL MEET CHECK =====
@@ -406,7 +500,7 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         if any(kw in msg_lower for kw in meet_keywords):
             await do_typing(client, chat_id)
             await event.respond("Only online service baby 😊 Payment karo, ready hoon! 🔥")
-            customer_message_count[sender_id] = prev_count + 1
+            set_customer_count(sender_id, prev_count + 1)
             return
         
         # ===== NORMAL AI REPLY =====
@@ -424,10 +518,10 @@ async def handle_ai_mode(event, client, acc_info, sender_id):
         if reply:
             await event.respond(reply)
         
-        customer_message_count[sender_id] = prev_count + 1
+        set_customer_count(sender_id, prev_count + 1)
     
     except Exception as e:
-        logger.error(f"AI mode error: {e}", exc_info=True)
+        logger.error(f"AI mode single error: {e}", exc_info=True)
         try:
             await event.respond("Ready hoon baby, payment karo! 😘🔥")
         except:
@@ -478,12 +572,12 @@ async def handle_payment_screenshot(event, client, sender_id):
             f"🚨 **NEW PAYMENT!** 🚨\n\n"
             f"👤 Customer: [{sender_name}](tg://user?id={sender_id})\n"
             f"🆔 ID: `{sender_id}`\n"
-            f"💬 Messages: {customer_message_count.get(sender_id, 0)}\n\n"
+            f"💬 Messages: {get_customer_count(sender_id)}\n\n"
             f"🔴 **ADMIN CHECK!** 🔴",
             parse_mode='Markdown'
         )
         await client.send_file(ADMIN_ID, file_path)
-        customer_message_count[sender_id] = -2
+        set_customer_count(sender_id, -2)
         logger.info(f"Payment screenshot from {sender_id}")
     except Exception as e:
         logger.error(f"Screenshot error: {e}")
@@ -505,13 +599,13 @@ async def handle_keyword_mode(event, client, acc_info):
         if not msg_text.strip():
             return
         
-        prev_count = customer_message_count.get(sender_id, 0)
+        prev_count = get_customer_count(sender_id)
         
         # প্রথম মেসেজ ওয়েলকাম
         if prev_count == 0:
             await do_typing(client, chat_id)
             await send_welcome(client, chat_id)
-            customer_message_count[sender_id] = 1
+            set_customer_count(sender_id, 1)
             return
         
         try:
@@ -548,7 +642,7 @@ async def handle_keyword_mode(event, client, acc_info):
                 default_reply = get_setting('default_reply_text', 'Ready hoon baby, payment karo! 🔥')
                 await event.respond(default_reply)
         
-        customer_message_count[sender_id] = prev_count + 1
+        set_customer_count(sender_id, prev_count + 1)
     except Exception as e:
         logger.error(f"Keyword mode error: {e}")
 
@@ -818,8 +912,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("✅ **Keyword Mode!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]]))
     
     elif data == "reset_counters":
-        customer_message_count.clear()
+        # সব কাউন্টার রিসেট
+        try:
+            import sqlite3
+            conn = sqlite3.connect('shrutibot.db')
+            c = conn.cursor()
+            c.execute('DROP TABLE IF EXISTS customer_counts')
+            conn.commit()
+            conn.close()
+        except:
+            pass
         _processing_users.clear()
+        _user_message_buffer.clear()
+        _buffer_tasks.clear()
         await query.edit_message_text("✅ Counters reset!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="menu_ai")]]))
     
     elif data == "change_model":
@@ -979,12 +1084,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         typing_st = '✅ On' if get_setting('typing_enabled','1')=='1' else '❌ Off'
         bp_st = '✅ On' if get_setting('block_photo_enabled','1')=='1' else '❌ Off'
         
+        try:
+            import sqlite3
+            conn = sqlite3.connect('shrutibot.db')
+            c = conn.cursor()
+            c.execute('SELECT COUNT(*) FROM customer_counts')
+            total_customers = c.fetchone()[0]
+            conn.close()
+        except:
+            total_customers = 0
+        
         accs = "\n".join([f"{'🟢' if a.get('enabled',True) else '🔴'} #{i+1} {a['name']} {'🤖' if a.get('mode')=='ai' else '📋'}" for i,a in enumerate(accounts)]) or "No accounts"
         msg = f"📊 **STATUS**\n\n"
         msg += f"👥 Accounts: {len(accounts)}\n{accs}\n\n"
         msg += f"🤖 AI Mode: {ai_active}/{len(accounts)}\n"
         msg += f"🧠 Model: `{model}`\n"
         msg += f"📝 Replies: {get_reply_count()}\n"
+        msg += f"👤 Total Customers: {total_customers}\n"
         msg += f"⌨️ Typing: {typing_st} | ⏱️ {tt}s\n"
         msg += f"📸 Block Photo: {bp_st}"
         
@@ -1012,6 +1128,19 @@ async def keep_accounts_alive():
             await asyncio.sleep(30)
         except:
             await asyncio.sleep(30)
+
+# ===== SINGLE INSTANCE CHECK =====
+def check_single_instance():
+    """একসাথে শুধু ১টা ইন্সট্যান্স চলবে"""
+    lock_file = '/tmp/shruti_bot.lock'
+    try:
+        fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.write(fd, str(os.getpid()).encode())
+        return True
+    except (IOError, OSError):
+        logger.error("❌ পুরনো বট এখনও রান করছে! Lock ফাইল ব্লকড!")
+        return False
 
 # ===== BOT RUNNER =====
 async def run_bot():
@@ -1094,7 +1223,6 @@ async def run_bot():
         try:
             await app.stop()
         except:
-            pass
         try:
             await app.shutdown()
         except:
@@ -1104,6 +1232,12 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
 def run_main():
+    # 🔥 সিঙ্গেল ইন্সট্যান্স চেক
+    if not check_single_instance():
+        logger.error("❌ দুটি ইন্সট্যান্স একসাথে চলতে পারে না! পুরনো বট বন্ধ করুন!")
+        os._exit(1)
+    
+    # পুরনো প্রসেস কিল করার চেষ্টা
     try:
         current_pid = os.getpid()
         result = subprocess.run(["ps", "aux"], capture_output=True, text=True)

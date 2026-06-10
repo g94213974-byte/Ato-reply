@@ -724,25 +724,32 @@ async def run_bot():
     init_db()
     logger.info("Database ready")
     get_ai_bot()
-    await start_all_accounts()
-    asyncio.create_task(keep_alive())
     
-    # Webhook cleanup
+    # ===== AGGRESSIVE WEBHOOK CLEANUP BEFORE ANYTHING =====
     for attempt in range(5):
         try:
             bot = Bot(token=BOT_TOKEN)
+            
+            # Delete webhook
             wh = await bot.get_webhook_info()
-            if wh.url:
+            if wh and wh.url:
                 await bot.delete_webhook(drop_pending_updates=True)
                 await asyncio.sleep(3)
+            
             await bot.delete_webhook(drop_pending_updates=True)
             await asyncio.sleep(2)
-            try:
-                await bot.get_updates(offset=-1, timeout=1)
-                await asyncio.sleep(1)
-                await bot.get_updates(offset=-1, timeout=1)
-            except:
-                pass
+            
+            # Clear any stale long-poll connections by fetching + acknowledging updates
+            for _ in range(3):
+                try:
+                    updates = await bot.get_updates(offset=-1, timeout=1, read_timeout=2)
+                    if updates:
+                        last_id = updates[-1].update_id
+                        await bot.get_updates(offset=last_id + 1, timeout=1, read_timeout=2)
+                    await asyncio.sleep(1)
+                except:
+                    await asyncio.sleep(1)
+            
             await asyncio.sleep(2)
             break
         except Conflict as e:
@@ -753,7 +760,16 @@ async def run_bot():
             logger.warning(f"Cleanup {attempt+1}: {e}")
             await asyncio.sleep(5)
     
-    app = (ApplicationBuilder().token(BOT_TOKEN).build())
+    await start_all_accounts()
+    asyncio.create_task(keep_alive())
+    
+    # Build app with timeouts
+    app = (ApplicationBuilder()
+           .token(BOT_TOKEN)
+           .get_updates_read_timeout(30)
+           .get_updates_write_timeout(30)
+           .build())
+    
     app.add_handler(MessageHandler(filters.ALL, msg_handler))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_error_handler(error_handler)
@@ -791,44 +807,135 @@ async def run_bot():
 def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
-def run_main():
+def kill_all_old_processes(current_pid):
+    """Kill ALL old Python/Telegram processes except this one."""
+    killed = []
+    
+    # Method 1: Parse ps aux output
     try:
-        pid = os.getpid()
-        r = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+        r = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
         for line in r.stdout.split('\n'):
-            if 'python' in line and 'main.py' in line:
-                parts = line.split()
-                if len(parts) > 1:
-                    try:
-                        p = int(parts[1])
-                        if p != pid:
-                            os.kill(p, signal.SIGKILL)
-                    except:
-                        pass
-        r2 = subprocess.run(["ps", "aux"], capture_output=True, text=True)
-        for line in r2.stdout.split('\n'):
-            if 'getUpdates' in line or 'telegram' in line.lower():
-                parts = line.split()
-                if len(parts) > 1:
-                    try:
-                        p = int(parts[1])
-                        if p != pid:
-                            os.kill(p, signal.SIGKILL)
-                    except:
-                        pass
-        sleep(5)
+            parts = line.split()
+            if len(parts) < 11:
+                continue
+            try:
+                p = int(parts[1])
+            except (ValueError, IndexError):
+                continue
+            if p == current_pid:
+                continue
+            
+            cmd = ' '.join(parts[10:]).lower()
+            # Match Python processes related to our bot
+            if any(x in cmd for x in ['main.py', 'shruti', 'shrutibot', 'telegram', 'getupdate', 'telethon']):
+                try:
+                    os.kill(p, signal.SIGKILL)
+                    killed.append(p)
+                    logger.info(f"Killed process {p}")
+                except ProcessLookupError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Kill error {p}: {e}")
+    except Exception as e:
+        logger.warning(f"ps aux error: {e}")
+    
+    # Method 2: Kill by token substring (catches all related processes)
+    try:
+        token_prefix = BOT_TOKEN[:15]
+        r = subprocess.run(["pgrep", "-af", token_prefix], capture_output=True, text=True, timeout=5)
+        for line in r.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            try:
+                p = int(line.split()[0])
+                if p != current_pid:
+                    os.kill(p, signal.SIGKILL)
+                    killed.append(p)
+            except:
+                pass
     except:
         pass
     
+    # Method 3: Kill any python process running related scripts
+    try:
+        r = subprocess.run(["pgrep", "-f", "python"], capture_output=True, text=True, timeout=5)
+        for line in r.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            try:
+                p = int(line.strip())
+                if p == current_pid:
+                    continue
+                # Check cmdline
+                try:
+                    with open(f"/proc/{p}/cmdline", "r") as f:
+                        cmd = f.read().lower()
+                        if any(x in cmd for x in ['main.py', 'shruti', 'shrutibot', 'telegram']):
+                            os.kill(p, signal.SIGKILL)
+                            killed.append(p)
+                except:
+                    pass
+            except:
+                pass
+    except:
+        pass
+    
+    sleep(2)
+    
+    # Method 4: Kill remaining getUpdates processes
+    try:
+        r = subprocess.run(["pgrep", "-af", "getUpdates"], capture_output=True, text=True, timeout=5)
+        for line in r.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            try:
+                p = int(line.split()[0])
+                if p != current_pid:
+                    os.kill(p, signal.SIGKILL)
+                    killed.append(p)
+            except:
+                pass
+    except:
+        pass
+    
+    logger.info(f"Killed {len(killed)} old processes: {killed}")
+    sleep(2)
+
+def run_main():
+    pid = os.getpid()
+    logger.info(f"Starting main process PID: {pid}")
+    
+    # Kill old instances first
+    kill_all_old_processes(pid)
+    
+    # Remove old PID file
     try:
         os.remove("bot.pid")
     except:
         pass
+    
+    # Write new PID
     with open("bot.pid", "w") as f:
         f.write(str(os.getpid()))
     
+    # Start Flask
     Thread(target=run_flask, daemon=True).start()
     sleep(3)
+    
+    # Force cleanup webhook synchronously before asyncio
+    try:
+        import requests
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true"
+        requests.get(url, timeout=10)
+        sleep(1)
+        url2 = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1&timeout=1"
+        requests.get(url2, timeout=10)
+        sleep(1)
+    except:
+        pass
+    
+    sleep(2)
+    
     try:
         asyncio.run(run_bot())
     except Exception as e:

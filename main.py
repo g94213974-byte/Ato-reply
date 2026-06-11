@@ -38,8 +38,8 @@ SESSION_FILE = "saved_sessions.json"
 _bot_started = False
 LOCK_FILE = "bot_instance.lock"
 
-# 🔥 Webhook URL - Render এর URL বসাও
-RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://your-app.onrender.com')
+# 🔥 Webhook URL
+RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://ato-reply-75zl.onrender.com')
 WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
 DEFAULT_PRICE_LIST = """💰 **SHRUTI PRICE LIST** 💰
@@ -66,7 +66,8 @@ PHOTO_BLOCK_KEYWORDS = ['pic', 'pics', 'picture', 'photo', 'image', 'nude pic', 
                         'nude video', 'sex video', 'blue film', 'bf', 'xxx video']
 
 shruti_bot = None
-application = None  # 🔥 Global application reference
+application = None
+_loop = None  # 🔥 Store event loop globally
 
 def get_ai_bot():
     global shruti_bot
@@ -705,24 +706,35 @@ async def keep_alive():
         except:
             await asyncio.sleep(30)
 
-# ===== 🔥 WEBHOOK HANDLER =====
+# ===== 🔥 FIXED WEBHOOK HANDLER =====
 @flask_app.route('/webhook', methods=['POST'])
 def webhook_handler():
-    """Telegram থেকে webhook request handle করে"""
-    if application is None:
+    """Telegram webhook handle - FIXED version"""
+    global application, _loop
+    
+    if application is None or _loop is None:
+        logger.error("Application not ready yet!")
         return "Bot not ready", 503
     
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, application.bot)
-        asyncio.run_coroutine_threadsafe(
+        
+        # 🔥 FIX: Use run_coroutine_threadsafe with stored loop
+        future = asyncio.run_coroutine_threadsafe(
             application.process_update(update),
-            application.loop
+            _loop
         )
+        # Wait briefly for the update to be processed
+        try:
+            future.result(timeout=5)
+        except Exception as e:
+            logger.warning(f"Process update timeout/warning: {e}")
+        
         return "OK", 200
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return "Error", 500
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return f"Error: {str(e)}", 500
 
 @flask_app.route('/')
 def home():
@@ -734,7 +746,7 @@ def health():
 
 @flask_app.route('/setwebhook', methods=['GET'])
 def set_webhook_route():
-    """Webhook সেট করার জন্য API"""
+    """Manually set webhook"""
     import requests
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
     resp = requests.post(url, json={
@@ -747,24 +759,22 @@ def set_webhook_route():
 
 @flask_app.route('/delwebhook', methods=['GET'])
 def del_webhook_route():
-    """Webhook ডিলিট করার জন্য API"""
+    """Delete webhook"""
     import requests
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
     resp = requests.post(url, json={"drop_pending_updates": True})
     return jsonify(resp.json())
 
 async def setup_webhook():
-    """🔴 Webhook সেটআপ করো"""
+    """Set up webhook on Telegram"""
     import httpx
     async with httpx.AsyncClient(timeout=30) as client:
-        # প্রথমে পুরনো সবকিছু clear করো
         await client.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
             json={"drop_pending_updates": True}
         )
         await asyncio.sleep(2)
         
-        # তারপর webhook set করো
         resp = await client.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
             json={
@@ -779,9 +789,12 @@ async def setup_webhook():
         return data.get("ok", False)
 
 async def run_bot():
-    global _bot_started, application
+    global _bot_started, application, _loop
     
-    # 🔥 File lock check
+    # Store the event loop
+    _loop = asyncio.get_event_loop()
+    
+    # File lock check
     if os.path.exists(LOCK_FILE):
         try:
             with open(LOCK_FILE, 'r') as f:
@@ -808,7 +821,7 @@ async def run_bot():
     logger.info("Database ready")
     get_ai_bot()
     
-    # 🔥 Webhook সেটআপ করো
+    # Setup webhook
     webhook_ok = await setup_webhook()
     if not webhook_ok:
         logger.error("Failed to set webhook!")
@@ -816,7 +829,7 @@ async def run_bot():
     await start_all_accounts()
     asyncio.create_task(keep_alive())
     
-    # 🔥 Application build করো কিন্তু polling ছাড়া
+    # Build application
     application = (ApplicationBuilder()
            .token(BOT_TOKEN)
            .build())
@@ -830,7 +843,6 @@ async def run_bot():
     
     logger.info(f"✅ Bot running on webhook mode!")
     logger.info(f"🌐 Webhook URL: {WEBHOOK_URL}")
-    logger.info(f"📌 Go to: https://your-app.onrender.com/setwebhook to set webhook manually")
     
     try:
         await asyncio.Event().wait()
@@ -850,7 +862,7 @@ async def run_bot():
             pass
 
 def run_flask():
-    flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
+    flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), debug=False, use_reloader=False)
 
 def run_main():
     global _bot_started

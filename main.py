@@ -9,7 +9,7 @@ import time
 from threading import Thread
 from time import sleep
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Application, ApplicationBuilder, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import Conflict
@@ -29,14 +29,6 @@ logger = logging.getLogger(__name__)
 
 flask_app = Flask(__name__)
 
-@flask_app.route('/')
-def home():
-    return jsonify({"status": "running", "bot": "Shruti AI Bot", "accounts": len(accounts)})
-
-@flask_app.route('/health')
-def health():
-    return jsonify({"status": "ok"}), 200
-
 # ===== GLOBAL =====
 accounts = []
 customer_count = {}
@@ -44,7 +36,11 @@ customer_payment_photos = {}
 _processing = set()
 SESSION_FILE = "saved_sessions.json"
 _bot_started = False
-LOCK_FILE = "bot_instance.lock"  # 🔥 File-based lock
+LOCK_FILE = "bot_instance.lock"
+
+# 🔥 Webhook URL - Render এর URL বসাও
+RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://your-app.onrender.com')
+WEBHOOK_URL = f"{RENDER_URL}/webhook"
 
 DEFAULT_PRICE_LIST = """💰 **SHRUTI PRICE LIST** 💰
 
@@ -70,6 +66,7 @@ PHOTO_BLOCK_KEYWORDS = ['pic', 'pics', 'picture', 'photo', 'image', 'nude pic', 
                         'nude video', 'sex video', 'blue film', 'bf', 'xxx video']
 
 shruti_bot = None
+application = None  # 🔥 Global application reference
 
 def get_ai_bot():
     global shruti_bot
@@ -708,43 +705,83 @@ async def keep_alive():
         except:
             await asyncio.sleep(30)
 
-async def cleanup_telegram_api():
-    """🔥 Direct Telegram API call to kill old polls"""
+# ===== 🔥 WEBHOOK HANDLER =====
+@flask_app.route('/webhook', methods=['POST'])
+def webhook_handler():
+    """Telegram থেকে webhook request handle করে"""
+    if application is None:
+        return "Bot not ready", 503
+    
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, application.bot)
+        asyncio.run_coroutine_threadsafe(
+            application.process_update(update),
+            application.loop
+        )
+        return "OK", 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return "Error", 500
+
+@flask_app.route('/')
+def home():
+    return jsonify({"status": "running", "bot": "Shruti AI Bot", "accounts": len(accounts)})
+
+@flask_app.route('/health')
+def health():
+    return jsonify({"status": "ok"}), 200
+
+@flask_app.route('/setwebhook', methods=['GET'])
+def set_webhook_route():
+    """Webhook সেট করার জন্য API"""
+    import requests
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+    resp = requests.post(url, json={
+        "url": WEBHOOK_URL,
+        "drop_pending_updates": True,
+        "max_connections": 1,
+        "allowed_updates": ["message", "callback_query"]
+    })
+    return jsonify(resp.json())
+
+@flask_app.route('/delwebhook', methods=['GET'])
+def del_webhook_route():
+    """Webhook ডিলিট করার জন্য API"""
+    import requests
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
+    resp = requests.post(url, json={"drop_pending_updates": True})
+    return jsonify(resp.json())
+
+async def setup_webhook():
+    """🔴 Webhook সেটআপ করো"""
     import httpx
     async with httpx.AsyncClient(timeout=30) as client:
-        for i in range(5):
-            try:
-                r = await client.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
-                    json={"drop_pending_updates": True}
-                )
-                logger.info(f"Webhook deleted: {r.json()}")
-                await asyncio.sleep(2)
-                
-                r = await client.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-                    json={"offset": -1, "timeout": 1}
-                )
-                data = r.json()
-                if data.get("ok") and data.get("result"):
-                    max_id = max(u["update_id"] for u in data["result"]) if data["result"] else 0
-                    if max_id > 0:
-                        await client.post(
-                            f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-                            json={"offset": max_id + 1, "timeout": 1}
-                        )
-                        logger.info(f"Updates acknowledged till {max_id}")
-                await asyncio.sleep(1)
-                return True
-            except Exception as e:
-                logger.warning(f"Cleanup attempt {i+1}: {e}")
-                await asyncio.sleep(5)
-    return False
+        # প্রথমে পুরনো সবকিছু clear করো
+        await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+            json={"drop_pending_updates": True}
+        )
+        await asyncio.sleep(2)
+        
+        # তারপর webhook set করো
+        resp = await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+            json={
+                "url": WEBHOOK_URL,
+                "drop_pending_updates": True,
+                "max_connections": 1,
+                "allowed_updates": ["message", "callback_query"]
+            }
+        )
+        data = resp.json()
+        logger.info(f"Webhook setup: {data}")
+        return data.get("ok", False)
 
 async def run_bot():
-    global _bot_started
+    global _bot_started, application
     
-    # 🔥 FILE LOCK CHECK - prevents double instance
+    # 🔥 File lock check
     if os.path.exists(LOCK_FILE):
         try:
             with open(LOCK_FILE, 'r') as f:
@@ -752,11 +789,9 @@ async def run_bot():
             if old_pid and old_pid.isdigit():
                 try:
                     os.kill(int(old_pid), 0)
-                    logger.warning(f"Another instance (PID {old_pid}) is running! Exiting.")
+                    logger.warning(f"Another instance (PID {old_pid}) running! Exiting.")
                     return
                 except ProcessLookupError:
-                    pass
-                except:
                     pass
         except:
             pass
@@ -764,7 +799,6 @@ async def run_bot():
     with open(LOCK_FILE, 'w') as f:
         f.write(str(os.getpid()))
     
-    # 🔥 Global flag check
     if _bot_started:
         logger.warning("Bot already started! Skipping...")
         return
@@ -774,65 +808,39 @@ async def run_bot():
     logger.info("Database ready")
     get_ai_bot()
     
-    # 🔥 Cleanup before starting
-    await cleanup_telegram_api()
+    # 🔥 Webhook সেটআপ করো
+    webhook_ok = await setup_webhook()
+    if not webhook_ok:
+        logger.error("Failed to set webhook!")
     
     await start_all_accounts()
     asyncio.create_task(keep_alive())
     
-    app = (ApplicationBuilder()
+    # 🔥 Application build করো কিন্তু polling ছাড়া
+    application = (ApplicationBuilder()
            .token(BOT_TOKEN)
-           .get_updates_read_timeout(30)
-           .get_updates_write_timeout(30)
            .build())
     
-    app.add_handler(MessageHandler(filters.ALL, msg_handler))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_error_handler(error_handler)
+    application.add_handler(MessageHandler(filters.ALL, msg_handler))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_error_handler(error_handler)
     
-    await app.initialize()
-    await app.start()
+    await application.initialize()
+    await application.start()
     
-    last_error = None
-    for pa in range(3):
-        try:
-            await app.updater.start_polling(
-                drop_pending_updates=True,
-                allowed_updates=["message", "callback_query"],
-                poll_interval=0.5
-            )
-            logger.info("✅ Bot polling started!")
-            last_error = None
-            break
-        except Conflict as e:
-            last_error = e
-            logger.error(f"Conflict {pa+1}: {e}")
-            if pa < 2:
-                await asyncio.sleep(15)
-                await cleanup_telegram_api()
-    
-    if last_error:
-        logger.error(f"Failed after 3 attempts: {last_error}")
-        _bot_started = False
-        try:
-            os.remove(LOCK_FILE)
-        except:
-            pass
-        return
+    logger.info(f"✅ Bot running on webhook mode!")
+    logger.info(f"🌐 Webhook URL: {WEBHOOK_URL}")
+    logger.info(f"📌 Go to: https://your-app.onrender.com/setwebhook to set webhook manually")
     
     try:
         await asyncio.Event().wait()
     finally:
         try:
-            await app.updater.stop()
+            await application.stop()
         except:
             pass
         try:
-            await app.stop()
-        except:
-            pass
-        try:
-            await app.shutdown()
+            await application.shutdown()
         except:
             pass
         _bot_started = False
@@ -848,7 +856,6 @@ def run_main():
     global _bot_started
     
     if _bot_started:
-        logger.warning("Main already running! Exiting...")
         return
     
     pid = os.getpid()
@@ -862,38 +869,6 @@ def run_main():
         f.write(str(os.getpid()))
     
     Thread(target=run_flask, daemon=True).start()
-    sleep(3)
-    
-    # 🔥 SYNC CLEANUP
-    import requests
-    try:
-        for i in range(3):
-            requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
-                json={"drop_pending_updates": True},
-                timeout=15
-            )
-            sleep(2)
-            
-            r = requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-                json={"offset": -1, "timeout": 1},
-                timeout=15
-            )
-            data = r.json()
-            if data.get("ok") and data.get("result") and len(data["result"]) > 0:
-                max_id = max(u["update_id"] for u in data["result"])
-                requests.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-                    json={"offset": max_id + 1, "timeout": 1},
-                    timeout=15
-                )
-                logger.info(f"Sync cleanup: acknowledged till {max_id}")
-            sleep(1)
-            break
-    except Exception as e:
-        logger.warning(f"Sync cleanup error: {e}")
-    
     sleep(3)
     
     try:

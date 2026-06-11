@@ -43,7 +43,8 @@ customer_count = {}
 customer_payment_photos = {}
 _processing = set()
 SESSION_FILE = "saved_sessions.json"
-_bot_started = False  # 🔥 NEW: prevent double polling
+_bot_started = False
+LOCK_FILE = "bot_instance.lock"  # 🔥 File-based lock
 
 DEFAULT_PRICE_LIST = """💰 **SHRUTI PRICE LIST** 💰
 
@@ -708,12 +709,11 @@ async def keep_alive():
             await asyncio.sleep(30)
 
 async def cleanup_telegram_api():
-    """🔥 Telegram API direct call kore purono poll clean kore"""
+    """🔥 Direct Telegram API call to kill old polls"""
     import httpx
     async with httpx.AsyncClient(timeout=30) as client:
         for i in range(5):
             try:
-                # Step 1: Webhook delete
                 r = await client.post(
                     f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
                     json={"drop_pending_updates": True}
@@ -721,7 +721,6 @@ async def cleanup_telegram_api():
                 logger.info(f"Webhook deleted: {r.json()}")
                 await asyncio.sleep(2)
                 
-                # Step 2: Purono getUpdates poll clear koro
                 r = await client.post(
                     f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
                     json={"offset": -1, "timeout": 1}
@@ -735,7 +734,6 @@ async def cleanup_telegram_api():
                             json={"offset": max_id + 1, "timeout": 1}
                         )
                         logger.info(f"Updates acknowledged till {max_id}")
-                
                 await asyncio.sleep(1)
                 return True
             except Exception as e:
@@ -746,7 +744,27 @@ async def cleanup_telegram_api():
 async def run_bot():
     global _bot_started
     
-    # 🔥 DOUBLE INSTANCE CHECK
+    # 🔥 FILE LOCK CHECK - prevents double instance
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, 'r') as f:
+                old_pid = f.read().strip()
+            if old_pid and old_pid.isdigit():
+                try:
+                    os.kill(int(old_pid), 0)
+                    logger.warning(f"Another instance (PID {old_pid}) is running! Exiting.")
+                    return
+                except ProcessLookupError:
+                    pass
+                except:
+                    pass
+        except:
+            pass
+    
+    with open(LOCK_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    
+    # 🔥 Global flag check
     if _bot_started:
         logger.warning("Bot already started! Skipping...")
         return
@@ -756,13 +774,12 @@ async def run_bot():
     logger.info("Database ready")
     get_ai_bot()
     
-    # 🔥 Telegram API direct cleanup
+    # 🔥 Cleanup before starting
     await cleanup_telegram_api()
     
     await start_all_accounts()
     asyncio.create_task(keep_alive())
     
-    # 🔥 Application build koro proper timeout diye
     app = (ApplicationBuilder()
            .token(BOT_TOKEN)
            .get_updates_read_timeout(30)
@@ -776,7 +793,6 @@ async def run_bot():
     await app.initialize()
     await app.start()
     
-    # 🔥 Polling try koro
     last_error = None
     for pa in range(3):
         try:
@@ -785,23 +801,23 @@ async def run_bot():
                 allowed_updates=["message", "callback_query"],
                 poll_interval=0.5
             )
-            logger.info("✅ Bot polling started successfully!")
+            logger.info("✅ Bot polling started!")
             last_error = None
             break
         except Conflict as e:
             last_error = e
-            logger.error(f"Polling conflict {pa+1}: {e}")
+            logger.error(f"Conflict {pa+1}: {e}")
             if pa < 2:
-                logger.info("⏳ Waiting 15s before retry...")
                 await asyncio.sleep(15)
-                # Again cleanup
                 await cleanup_telegram_api()
-            else:
-                logger.error("❌ All polling attempts failed!")
     
     if last_error:
-        logger.error(f"Could not start polling after 3 attempts: {last_error}")
+        logger.error(f"Failed after 3 attempts: {last_error}")
         _bot_started = False
+        try:
+            os.remove(LOCK_FILE)
+        except:
+            pass
         return
     
     try:
@@ -820,6 +836,10 @@ async def run_bot():
         except:
             pass
         _bot_started = False
+        try:
+            os.remove(LOCK_FILE)
+        except:
+            pass
 
 def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
@@ -827,7 +847,6 @@ def run_flask():
 def run_main():
     global _bot_started
     
-    # 🔥 Bot started flag check koro (prevent double run)
     if _bot_started:
         logger.warning("Main already running! Exiting...")
         return
@@ -835,7 +854,6 @@ def run_main():
     pid = os.getpid()
     logger.info(f"Starting PID: {pid}")
     
-    # PID file
     try:
         os.remove("bot.pid")
     except:
@@ -843,15 +861,13 @@ def run_main():
     with open("bot.pid", "w") as f:
         f.write(str(os.getpid()))
     
-    # Flask start
     Thread(target=run_flask, daemon=True).start()
     sleep(3)
     
-    # 🔥 SYNCHRONOUS CLEANUP - Telegram API direct call
+    # 🔥 SYNC CLEANUP
     import requests
     try:
         for i in range(3):
-            # Webhook delete
             requests.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
                 json={"drop_pending_updates": True},
@@ -859,7 +875,6 @@ def run_main():
             )
             sleep(2)
             
-            # Pending updates clear
             r = requests.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
                 json={"offset": -1, "timeout": 1},
@@ -891,6 +906,10 @@ def run_main():
         except:
             pass
         _bot_started = False
+        try:
+            os.remove(LOCK_FILE)
+        except:
+            pass
 
 if __name__ == "__main__":
     run_main()

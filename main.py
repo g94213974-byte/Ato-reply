@@ -3,7 +3,6 @@ import os
 import json
 import logging
 import random
-import shutil
 import signal
 import subprocess
 import time
@@ -40,10 +39,11 @@ def health():
 
 # ===== GLOBAL =====
 accounts = []
-customer_count = {}  # {user_id: count}
+customer_count = {}
 customer_payment_photos = {}
 _processing = set()
 SESSION_FILE = "saved_sessions.json"
+_bot_started = False  # 🔥 NEW: prevent double polling
 
 DEFAULT_PRICE_LIST = """💰 **SHRUTI PRICE LIST** 💰
 
@@ -156,16 +156,13 @@ def _register_handler(client, acc_info):
             _processing.discard(uid)
 
 async def process_message(event, client, acc_info, uid):
-    """মেইন মেসেজ প্রসেসর"""
     chat_id = event.chat_id
     msg_text = event.message.text or ""
     
-    # ===== কাউন্টার ম্যানেজ =====
     if uid not in customer_count:
         customer_count[uid] = 0
     prev = customer_count[uid]
     
-    # ===== স্টিকার =====
     if event.message.sticker:
         logger.info(f"Sticker from {uid}")
         await do_typing(client, chat_id)
@@ -173,7 +170,6 @@ async def process_message(event, client, acc_info, uid):
         customer_count[uid] = prev + 1
         return
     
-    # ===== ফোটো/মিডিয়া =====
     if event.message.photo or (event.message.document and event.message.document.mime_type and 'image' in event.message.document.mime_type):
         block = get_setting('block_photo_enabled', '1') == '1'
         if block:
@@ -182,11 +178,9 @@ async def process_message(event, client, acc_info, uid):
             await handle_payment_screenshot(event, client, uid)
         return
     
-    # ===== টেক্সট মেসেজ =====
     if not msg_text.strip():
         return
     
-    # ⭐ ফার্স্ট মেসেজ → শুধু ওয়েলকাম
     if prev == 0:
         logger.info(f"First message from {uid} - welcome only")
         await do_typing(client, chat_id)
@@ -194,7 +188,6 @@ async def process_message(event, client, acc_info, uid):
         customer_count[uid] = 1
         return
     
-    # read history
     try:
         peer = await event.get_input_chat()
         await client(ReadHistoryRequest(peer=peer, max_id=event.message.id))
@@ -203,7 +196,6 @@ async def process_message(event, client, acc_info, uid):
     
     msg_lower = msg_text.lower().strip()
     
-    # ===== কাস্টম রিপ্লাই চেক =====
     replies = get_all_replies()
     for rid, keyword, reply_text, rtype in replies:
         kw = keyword.lower().strip()
@@ -218,21 +210,18 @@ async def process_message(event, client, acc_info, uid):
             customer_count[uid] = prev + 1
             return
     
-    # ===== পেমেন্ট কোয়েরি =====
     if any(kw in msg_lower for kw in PAYMENT_KEYWORDS + ['kaha kar', 'kisme kar', 'kaise kar', 'kaha pay', 'kaise pay', 'kaha bhej', 'kaise bhej', 'method', 'scan', 'qr', 'upi id', 'kya hai', 'kaha hai']):
         await do_typing(client, chat_id)
         await send_payment_info(client, chat_id, event)
         customer_count[uid] = prev + 1
         return
     
-    # ===== ফোটো ব্লক কীওয়ার্ড =====
     if any(kw in msg_lower for kw in PHOTO_BLOCK_KEYWORDS):
         await do_typing(client, chat_id)
         await event.respond("Payment karo baby, phir maza lo 😘🔥 Service ready hai! 💯")
         customer_count[uid] = prev + 1
         return
     
-    # ===== সার্ভিস কীওয়ার্ড =====
     if any(kw in msg_lower for kw in SERVICE_KEYWORDS):
         await do_typing(client, chat_id)
         price_text = get_setting('price_list_text', DEFAULT_PRICE_LIST)
@@ -250,14 +239,12 @@ async def process_message(event, client, acc_info, uid):
         customer_count[uid] = prev + 1
         return
     
-    # ===== রিয়েল মিট =====
     if any(kw in msg_lower for kw in ['real', 'meet', 'mil', 'aao', 'aana', 'ghar', 'location', 'aaja', 'offline', 'milna', 'live']):
         await do_typing(client, chat_id)
         await event.respond("Only online service baby 😊 Payment karo, ready hoon! 🔥")
         customer_count[uid] = prev + 1
         return
     
-    # ===== AI রিপ্লাই =====
     await do_typing(client, chat_id)
     try:
         ai = get_ai_bot()
@@ -720,50 +707,62 @@ async def keep_alive():
         except:
             await asyncio.sleep(30)
 
+async def cleanup_telegram_api():
+    """🔥 Telegram API direct call kore purono poll clean kore"""
+    import httpx
+    async with httpx.AsyncClient(timeout=30) as client:
+        for i in range(5):
+            try:
+                # Step 1: Webhook delete
+                r = await client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+                    json={"drop_pending_updates": True}
+                )
+                logger.info(f"Webhook deleted: {r.json()}")
+                await asyncio.sleep(2)
+                
+                # Step 2: Purono getUpdates poll clear koro
+                r = await client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+                    json={"offset": -1, "timeout": 1}
+                )
+                data = r.json()
+                if data.get("ok") and data.get("result"):
+                    max_id = max(u["update_id"] for u in data["result"]) if data["result"] else 0
+                    if max_id > 0:
+                        await client.post(
+                            f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+                            json={"offset": max_id + 1, "timeout": 1}
+                        )
+                        logger.info(f"Updates acknowledged till {max_id}")
+                
+                await asyncio.sleep(1)
+                return True
+            except Exception as e:
+                logger.warning(f"Cleanup attempt {i+1}: {e}")
+                await asyncio.sleep(5)
+    return False
+
 async def run_bot():
+    global _bot_started
+    
+    # 🔥 DOUBLE INSTANCE CHECK
+    if _bot_started:
+        logger.warning("Bot already started! Skipping...")
+        return
+    _bot_started = True
+    
     init_db()
     logger.info("Database ready")
     get_ai_bot()
     
-    # ===== AGGRESSIVE WEBHOOK CLEANUP BEFORE ANYTHING =====
-    for attempt in range(5):
-        try:
-            bot = Bot(token=BOT_TOKEN)
-            
-            # Delete webhook
-            wh = await bot.get_webhook_info()
-            if wh and wh.url:
-                await bot.delete_webhook(drop_pending_updates=True)
-                await asyncio.sleep(3)
-            
-            await bot.delete_webhook(drop_pending_updates=True)
-            await asyncio.sleep(2)
-            
-            # Clear any stale long-poll connections by fetching + acknowledging updates
-            for _ in range(3):
-                try:
-                    updates = await bot.get_updates(offset=-1, timeout=1, read_timeout=2)
-                    if updates:
-                        last_id = updates[-1].update_id
-                        await bot.get_updates(offset=last_id + 1, timeout=1, read_timeout=2)
-                    await asyncio.sleep(1)
-                except:
-                    await asyncio.sleep(1)
-            
-            await asyncio.sleep(2)
-            break
-        except Conflict as e:
-            logger.warning(f"Conflict {attempt+1}: {e}")
-            if attempt < 4:
-                await asyncio.sleep((attempt+1)*5)
-        except Exception as e:
-            logger.warning(f"Cleanup {attempt+1}: {e}")
-            await asyncio.sleep(5)
+    # 🔥 Telegram API direct cleanup
+    await cleanup_telegram_api()
     
     await start_all_accounts()
     asyncio.create_task(keep_alive())
     
-    # Build app with timeouts
+    # 🔥 Application build koro proper timeout diye
     app = (ApplicationBuilder()
            .token(BOT_TOKEN)
            .get_updates_read_timeout(30)
@@ -773,20 +772,37 @@ async def run_bot():
     app.add_handler(MessageHandler(filters.ALL, msg_handler))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_error_handler(error_handler)
+    
     await app.initialize()
     await app.start()
     
+    # 🔥 Polling try koro
+    last_error = None
     for pa in range(3):
         try:
-            await app.updater.start_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"], poll_interval=0.5)
-            logger.info("Bot polling started!")
+            await app.updater.start_polling(
+                drop_pending_updates=True,
+                allowed_updates=["message", "callback_query"],
+                poll_interval=0.5
+            )
+            logger.info("✅ Bot polling started successfully!")
+            last_error = None
             break
         except Conflict as e:
+            last_error = e
             logger.error(f"Polling conflict {pa+1}: {e}")
             if pa < 2:
-                await asyncio.sleep(10)
+                logger.info("⏳ Waiting 15s before retry...")
+                await asyncio.sleep(15)
+                # Again cleanup
+                await cleanup_telegram_api()
             else:
-                raise
+                logger.error("❌ All polling attempts failed!")
+    
+    if last_error:
+        logger.error(f"Could not start polling after 3 attempts: {last_error}")
+        _bot_started = False
+        return
     
     try:
         await asyncio.Event().wait()
@@ -803,138 +819,67 @@ async def run_bot():
             await app.shutdown()
         except:
             pass
+        _bot_started = False
 
 def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False, use_reloader=False)
 
-def kill_all_old_processes(current_pid):
-    """Kill ALL old Python/Telegram processes except this one."""
-    killed = []
-    
-    # Method 1: Parse ps aux output
-    try:
-        r = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
-        for line in r.stdout.split('\n'):
-            parts = line.split()
-            if len(parts) < 11:
-                continue
-            try:
-                p = int(parts[1])
-            except (ValueError, IndexError):
-                continue
-            if p == current_pid:
-                continue
-            
-            cmd = ' '.join(parts[10:]).lower()
-            # Match Python processes related to our bot
-            if any(x in cmd for x in ['main.py', 'shruti', 'shrutibot', 'telegram', 'getupdate', 'telethon']):
-                try:
-                    os.kill(p, signal.SIGKILL)
-                    killed.append(p)
-                    logger.info(f"Killed process {p}")
-                except ProcessLookupError:
-                    pass
-                except Exception as e:
-                    logger.warning(f"Kill error {p}: {e}")
-    except Exception as e:
-        logger.warning(f"ps aux error: {e}")
-    
-    # Method 2: Kill by token substring (catches all related processes)
-    try:
-        token_prefix = BOT_TOKEN[:15]
-        r = subprocess.run(["pgrep", "-af", token_prefix], capture_output=True, text=True, timeout=5)
-        for line in r.stdout.strip().split('\n'):
-            if not line.strip():
-                continue
-            try:
-                p = int(line.split()[0])
-                if p != current_pid:
-                    os.kill(p, signal.SIGKILL)
-                    killed.append(p)
-            except:
-                pass
-    except:
-        pass
-    
-    # Method 3: Kill any python process running related scripts
-    try:
-        r = subprocess.run(["pgrep", "-f", "python"], capture_output=True, text=True, timeout=5)
-        for line in r.stdout.strip().split('\n'):
-            if not line.strip():
-                continue
-            try:
-                p = int(line.strip())
-                if p == current_pid:
-                    continue
-                # Check cmdline
-                try:
-                    with open(f"/proc/{p}/cmdline", "r") as f:
-                        cmd = f.read().lower()
-                        if any(x in cmd for x in ['main.py', 'shruti', 'shrutibot', 'telegram']):
-                            os.kill(p, signal.SIGKILL)
-                            killed.append(p)
-                except:
-                    pass
-            except:
-                pass
-    except:
-        pass
-    
-    sleep(2)
-    
-    # Method 4: Kill remaining getUpdates processes
-    try:
-        r = subprocess.run(["pgrep", "-af", "getUpdates"], capture_output=True, text=True, timeout=5)
-        for line in r.stdout.strip().split('\n'):
-            if not line.strip():
-                continue
-            try:
-                p = int(line.split()[0])
-                if p != current_pid:
-                    os.kill(p, signal.SIGKILL)
-                    killed.append(p)
-            except:
-                pass
-    except:
-        pass
-    
-    logger.info(f"Killed {len(killed)} old processes: {killed}")
-    sleep(2)
-
 def run_main():
+    global _bot_started
+    
+    # 🔥 Bot started flag check koro (prevent double run)
+    if _bot_started:
+        logger.warning("Main already running! Exiting...")
+        return
+    
     pid = os.getpid()
-    logger.info(f"Starting main process PID: {pid}")
+    logger.info(f"Starting PID: {pid}")
     
-    # Kill old instances first
-    kill_all_old_processes(pid)
-    
-    # Remove old PID file
+    # PID file
     try:
         os.remove("bot.pid")
     except:
         pass
-    
-    # Write new PID
     with open("bot.pid", "w") as f:
         f.write(str(os.getpid()))
     
-    # Start Flask
+    # Flask start
     Thread(target=run_flask, daemon=True).start()
     sleep(3)
     
-    # Force cleanup webhook synchronously before asyncio
+    # 🔥 SYNCHRONOUS CLEANUP - Telegram API direct call
+    import requests
     try:
-        import requests
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true"
-        requests.get(url, timeout=10)
-        sleep(1)
-        url2 = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1&timeout=1"
-        requests.get(url2, timeout=10)
-        sleep(1)
-    except:
-        pass
+        for i in range(3):
+            # Webhook delete
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+                json={"drop_pending_updates": True},
+                timeout=15
+            )
+            sleep(2)
+            
+            # Pending updates clear
+            r = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+                json={"offset": -1, "timeout": 1},
+                timeout=15
+            )
+            data = r.json()
+            if data.get("ok") and data.get("result") and len(data["result"]) > 0:
+                max_id = max(u["update_id"] for u in data["result"])
+                requests.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+                    json={"offset": max_id + 1, "timeout": 1},
+                    timeout=15
+                )
+                logger.info(f"Sync cleanup: acknowledged till {max_id}")
+            sleep(1)
+            break
+    except Exception as e:
+        logger.warning(f"Sync cleanup error: {e}")
     
-    sleep(2)
+    sleep(3)
     
     try:
         asyncio.run(run_bot())
@@ -945,6 +890,7 @@ def run_main():
             os.remove("bot.pid")
         except:
             pass
+        _bot_started = False
 
 if __name__ == "__main__":
     run_main()

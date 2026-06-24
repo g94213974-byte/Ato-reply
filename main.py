@@ -30,7 +30,8 @@ from database import (
     init_db, get_setting, set_setting, add_reply, delete_reply,
     get_all_replies, get_reply_count, add_user_reply,
     get_user_specific_replies, delete_user_reply, get_all_user_replies,
-    get_user_reply_count
+    get_user_reply_count, add_ignore_reply, get_all_ignore_replies,
+    delete_ignore_reply, is_ignored_keyword
 )
 from config import BOT_TOKEN, ADMIN_ID, ACCOUNTS, API_ID, API_HASH
 from shruti_bot import ShrutiAIBot
@@ -99,9 +100,9 @@ def get_ai_bot():
     if shruti_bot is None:
         try:
             shruti_bot = ShrutiAIBot()
-            logger.info("AI Bot initialized")
+            logger.info("✅ AI Bot initialized")
         except Exception as e:
-            logger.error(f"AI bot init error: {e}")
+            logger.error(f"❌ AI bot init error: {e}")
     return shruti_bot
 
 
@@ -155,9 +156,9 @@ async def login_with_phone(phone_number, temp_key):
                     'created_at': time.time()
                 }
 
-                return {"status": "otp_sent", "message": f"OTP sent to {phone_number}"}
+                return {"status": "otp_sent", "message": f"📲 OTP sent to {phone_number}"}
             except FloodWaitError as e:
-                return {"status": "flood", "message": f"Flood wait: {e.seconds}s", "wait": e.seconds}
+                return {"status": "flood", "message": f"⏳ Flood wait: {e.seconds}s", "wait": e.seconds}
             except Exception as e:
                 await client.disconnect()
                 return {"status": "error", "message": str(e)}
@@ -176,13 +177,13 @@ async def login_with_phone(phone_number, temp_key):
 
 async def verify_otp(temp_key, otp_code):
     if temp_key not in _login_sessions:
-        return {"status": "error", "message": "Session expired. Start again."}
+        return {"status": "error", "message": "❌ Session expired. Start again."}
 
     session_data = _login_sessions[temp_key]
     client = session_data['client']
 
     if session_data['step'] != 'otp':
-        return {"status": "error", "message": "Wrong step. Expected OTP verification."}
+        return {"status": "error", "message": "❌ Wrong step. Expected OTP verification."}
 
     try:
         await client.sign_in(
@@ -212,26 +213,26 @@ async def verify_otp(temp_key, otp_code):
 
     except SessionPasswordNeededError:
         session_data['step'] = '2fa'
-        return {"status": "2fa_required", "message": "2FA password required"}
+        return {"status": "2fa_required", "message": "🔐 2FA password required"}
     except PhoneCodeInvalidError:
-        return {"status": "error", "message": "Invalid OTP code"}
+        return {"status": "error", "message": "❌ Invalid OTP code"}
     except PhoneCodeExpiredError:
-        return {"status": "error", "message": "OTP expired. Request a new one."}
+        return {"status": "error", "message": "❌ OTP expired. Request a new one."}
     except UserRestrictedError:
-        return {"status": "restricted", "message": "This account is restricted/banned"}
+        return {"status": "restricted", "message": "🚫 This account is restricted/banned"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
 async def verify_2fa(temp_key, password):
     if temp_key not in _login_sessions:
-        return {"status": "error", "message": "Session expired. Start again."}
+        return {"status": "error", "message": "❌ Session expired. Start again."}
 
     session_data = _login_sessions[temp_key]
     client = session_data['client']
 
     if session_data['step'] != '2fa':
-        return {"status": "error", "message": "Wrong step. Expected 2FA."}
+        return {"status": "error", "message": "❌ Wrong step. Expected 2FA."}
 
     try:
         await client.sign_in(password=password)
@@ -255,7 +256,7 @@ async def verify_2fa(temp_key, password):
             }
         }
     except SessionPasswordNeededError:
-        return {"status": "error", "message": "Wrong 2FA password"}
+        return {"status": "error", "message": "❌ Wrong 2FA password"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -276,11 +277,11 @@ async def start_single_account(session_string):
                 await client.delete_messages(me.id, [msg.id])
         except (UserRestrictedError, errors.UserRestrictedError) as e:
             is_restricted = True
-            logger.warning(f"Account {me.first_name} (ID: {me.id}) is RESTRICTED!")
+            logger.warning(f"🚫 Account {me.first_name} (ID: {me.id}) is RESTRICTED!")
         except FloodWaitError as e:
-            logger.warning(f"Flood wait on {me.first_name}: {e.seconds}s")
+            logger.warning(f"⏳ Flood wait on {me.first_name}: {e.seconds}s")
         except Exception as e:
-            logger.warning(f"Account check error for {me.first_name}: {e}")
+            logger.warning(f"⚠️ Account check error for {me.first_name}: {e}")
 
         acc_info = {
             'id': me.id,
@@ -293,25 +294,25 @@ async def start_single_account(session_string):
         }
 
         if is_restricted:
-            logger.info(f"Restricted account added but DISABLED: {me.first_name}")
+            logger.info(f"🚫 Restricted account added but DISABLED: {me.first_name}")
             try:
                 await client.log_out()
-                logger.info(f"Logged out restricted account: {me.first_name}")
+                logger.info(f"🚫 Logged out restricted account: {me.first_name}")
             except:
                 pass
         else:
             accounts.append(acc_info)
             _register_handler(client, acc_info)
             _save_sessions()
-            logger.info(f"Connected: {me.first_name} (ID: {me.id})")
+            logger.info(f"✅ Connected: {me.first_name} (ID: {me.id})")
 
         _save_restricted()
         return acc_info
     except UserRestrictedError as e:
-        logger.error(f"Account is restricted/banned: {e}")
+        logger.error(f"🚫 Account is restricted/banned: {e}")
         return {"error": "restricted", "message": "Account is restricted/banned"}
     except Exception as e:
-        logger.error(f"Account failed: {e}")
+        logger.error(f"❌ Account failed: {e}")
         return None
 
 
@@ -324,7 +325,7 @@ async def start_all_accounts():
                 await asyncio.sleep(2)
             except:
                 pass
-    logger.info(f"{len(accounts)} accounts connected (restricted excluded)")
+    logger.info(f"📊 {len(accounts)} accounts connected (restricted excluded)")
 
 
 # ===== RESTRICTED ACCOUNT CHECKING =====
@@ -342,7 +343,7 @@ async def check_account_restrictions():
                     async for msg in c.iter_messages(me.id, limit=1):
                         await c.delete_messages(me.id, [msg.id])
                 except (UserRestrictedError, errors.UserRestrictedError):
-                    logger.warning(f"Account {acc['name']} became restricted! Removing...")
+                    logger.warning(f"🚫 Account {acc['name']} became restricted! Removing...")
                     acc['restricted'] = True
                     acc['enabled'] = False
                     try:
@@ -357,7 +358,7 @@ async def check_account_restrictions():
                     _save_sessions()
                     _save_restricted()
                     await admin_broadcast(
-                        f"Account Restricted!\n\n{acc['name']}\nID: {acc['id']}\n\nAccount removed and logged out."
+                        f"🚫 **Account Restricted!**\n\n{acc['name']}\nID: {acc['id']}\n\nAccount removed and logged out."
                     )
             except:
                 pass
@@ -397,7 +398,7 @@ def _register_handler(client, acc_info):
             finally:
                 _processing.discard(uid)
         except Exception as e:
-            logger.error(f"Handler error: {e}")
+            logger.error(f"❌ Handler error: {e}")
             _processing.discard(uid)
 
 
@@ -410,7 +411,7 @@ async def process_message(event, client, acc_info, uid):
     prev = customer_count[uid]
 
     if event.message.sticker:
-        logger.info(f"Sticker from {uid}")
+        logger.info(f"🎭 Sticker from {uid}")
         await do_typing(client, chat_id)
         await send_welcome(client, chat_id)
         customer_count[uid] = prev + 1
@@ -427,8 +428,14 @@ async def process_message(event, client, acc_info, uid):
     if not msg_text.strip():
         return
 
+    # ===== IGNORE REPLY CHECK (সবচেয়ে আগে) =====
+    if is_ignored_keyword(msg_text):
+        logger.info(f"🚫 Ignored message from {uid}: {msg_text[:30]}")
+        customer_count[uid] = prev + 1
+        return  # কোনো উত্তর দেবে না
+
     if prev == 0:
-        logger.info(f"First message from {uid} - welcome only")
+        logger.info(f"👋 First message from {uid} - welcome only")
         await do_typing(client, chat_id)
         await send_welcome(client, chat_id)
         customer_count[uid] = 1
@@ -484,7 +491,7 @@ async def process_message(event, client, acc_info, uid):
 
     if any(kw in msg_lower for kw in PHOTO_BLOCK_KEYWORDS):
         await do_typing(client, chat_id)
-        await event.respond("Payment karo baby, phir maza lo Service ready hai!")
+        await event.respond("💸 Payment karo baby, phir maza lo! Service ready hai!")
         customer_count[uid] = prev + 1
         return
 
@@ -498,16 +505,16 @@ async def process_message(event, client, acc_info, uid):
             await event.respond(price_text)
         await asyncio.sleep(0.5)
         await event.respond(random.choice([
-            "Bolo kitna time chahiye? 10 min ya 20 min?",
-            "Pay karo baby, ready hoon main!",
-            "Payment karo, phir maza lo!"
+            "🗣️ Bolo kitna time chahiye? 10 min ya 20 min?",
+            "💳 Pay karo baby, ready hoon main!",
+            "💰 Payment karo, phir maza lo!"
         ]))
         customer_count[uid] = prev + 1
         return
 
     if any(kw in msg_lower for kw in ['real', 'meet', 'mil', 'aao', 'aana', 'ghar', 'location', 'aaja', 'offline', 'milna', 'live']):
         await do_typing(client, chat_id)
-        await event.respond("Only online service baby Payment karo, ready hoon!")
+        await event.respond("🖥️ Only online service baby! Payment karo, ready hoon!")
         customer_count[uid] = prev + 1
         return
 
@@ -529,16 +536,16 @@ async def process_message(event, client, acc_info, uid):
 def get_default_reply(msg_lower):
     if any(w in msg_lower for w in ['hi', 'hello', 'hey', 'hii', 'hy', 'hlo', 'helo']):
         return random.choice([
-            "Haan baby, ready hoon! Kitna time chahiye?",
-            "Hmm baby, kya chahiye?",
-            "Hi baby, ready hoon main! Batao kya lena hai?"
+            "👋 Haan baby, ready hoon! Kitna time chahiye?",
+            "😊 Hmm baby, kya chahiye?",
+            "🔥 Hi baby, ready hoon main! Batao kya lena hai?"
         ])
     return random.choice([
-        "Ready hoon baby, payment karo, maza lo!",
-        "Main ready hoon, tum payment karo!",
-        "Service ready hai baby, payment karo!",
-        "Batao kitna minute chahiye, payment karo!",
-        "Ready baby! Payment karo, phir maza lo!"
+        "💸 Ready hoon baby, payment karo, maza lo!",
+        "🔥 Main ready hoon, tum payment karo!",
+        "💎 Service ready hai baby, payment karo!",
+        "🗣️ Batao kitna minute chahiye, payment karo!",
+        "😘 Ready baby! Payment karo, phir maza lo!"
     ])
 
 
@@ -556,19 +563,35 @@ async def do_typing(client, chat_id):
 
 async def send_welcome(client, chat_id):
     try:
-        welcome_text = get_setting('welcome_message', '')
+        welcome_msg1 = get_setting('welcome_message_1', '')
+        welcome_msg2 = get_setting('welcome_message_2', '')
         welcome_img = get_setting('welcome_image', '')
-        if not welcome_text:
-            welcome_text = "SHRUTI PRICE LIST\n\n10 MIN VC = 99\n20 MIN VC = 119\nDEMO (2 MIN FULL NUDE) = 49\n\nPay karo baby, phir maza lo!"
+        
+        if not welcome_msg1:
+            welcome_msg1 = "👋 **Welcome baby! Ready hoon main!**"
+        if not welcome_msg2:
+            welcome_msg2 = "💰 **Price List:**\n10 MIN VC = ₹99\n20 MIN VC = ₹119\nDEMO (2 MIN FULL NUDE) = ₹49\n\n💳 Pay karo baby, phir maza lo!"
+        
+        # ===== Message 1 + Picture (একসাথে) =====
         if welcome_img and os.path.exists(welcome_img):
             try:
-                await client.send_file(chat_id, welcome_img, caption=welcome_text)
-                return
+                await client.send_file(chat_id, welcome_img, caption=welcome_msg1)
             except:
-                pass
-        await client.send_message(chat_id, welcome_text)
+                await client.send_message(chat_id, welcome_msg1)
+        else:
+            await client.send_message(chat_id, welcome_msg1)
+        
+        await asyncio.sleep(1.5)  # 1.5 second gap
+        
+        # ===== Message 2 (শুধু টেক্সট, কোন ছবি নেই) =====
+        await client.send_message(chat_id, welcome_msg2)
+            
     except Exception as e:
-        logger.error(f"Welcome error: {e}")
+        logger.error(f"❌ Welcome send error: {e}")
+        try:
+            await client.send_message(chat_id, "👋 Welcome baby!")
+        except:
+            pass
 
 
 async def send_payment_info(client, chat_id, event=None):
@@ -576,12 +599,12 @@ async def send_payment_info(client, chat_id, event=None):
         upi = get_setting('upi_id', '')
         paytm = get_setting('paytm_num', '')
         qr = get_setting('qr_code_path', '')
-        msg = "Payment Details\n\n"
+        msg = "💳 **Payment Details**\n\n"
         if upi:
-            msg += f"UPI ID: {upi}\n"
+            msg += f"🏦 **UPI ID:** `{upi}`\n"
         if paytm:
-            msg += f"PayTm: {paytm}\n"
-        msg += "\nScan karo baby, payment karo!"
+            msg += f"📱 **PayTm:** `{paytm}`\n"
+        msg += "\n📸 Scan karo baby, payment karo!"
         if qr and os.path.exists(qr):
             try:
                 await client.send_file(chat_id, qr, caption=msg)
@@ -590,7 +613,7 @@ async def send_payment_info(client, chat_id, event=None):
                 pass
         await event.respond(msg)
     except Exception as e:
-        logger.error(f"Payment info error: {e}")
+        logger.error(f"❌ Payment info error: {e}")
 
 
 async def handle_photo_block(event, client, uid):
@@ -621,9 +644,9 @@ async def handle_photo_block(event, client, uid):
             await client(DeleteContactsRequest(id=[uid]))
         except:
             pass
-        logger.info(f"Photo block done for {uid}")
+        logger.info(f"🚫 Photo block done for {uid}")
     except Exception as e:
-        logger.error(f"Photo block error: {e}")
+        logger.error(f"❌ Photo block error: {e}")
 
 
 async def handle_payment_screenshot(event, client, uid):
@@ -640,19 +663,19 @@ async def handle_payment_screenshot(event, client, uid):
         customer_payment_photos[uid] = path
         name = event.sender.first_name if event.sender else "Unknown"
         await event.respond(
-            "Payment screenshot received baby!\n\n"
-            "Main abhi ADMIN ko forward kar rahi hoon...\n"
-            "Admin aapko 2 minute mein personally handle karega!\n\n"
-            "Please wait baby..."
+            "✅ **Payment screenshot received baby!**\n\n"
+            "📤 Main abhi ADMIN ko forward kar rahi hoon...\n"
+            "👤 Admin aapko 2 minute mein personally handle karega!\n\n"
+            "⏳ Please wait baby..."
         )
         await client.send_message(
             ADMIN_ID,
-            f"NEW PAYMENT!\n\nCustomer: {name}\nID: {uid}\nMessages: {customer_count.get(uid, 0)}\n\nADMIN CHECK!"
+            f"💰 **NEW PAYMENT!**\n\n👤 Customer: {name}\n🆔 ID: {uid}\n💬 Messages: {customer_count.get(uid, 0)}\n\n👀 **ADMIN CHECK!**"
         )
         await client.send_file(ADMIN_ID, path)
         customer_count[uid] = -2
     except Exception as e:
-        logger.error(f"Screenshot error: {e}")
+        logger.error(f"❌ Screenshot error: {e}")
 
 
 # ===== BOT STUFF =====
@@ -661,33 +684,27 @@ async def show_main_menu(update, context):
     restricted = len([a for a in accounts if a.get('restricted', False)])
     model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
     keyboard = [
-        [InlineKeyboardButton("Login with Phone", callback_data="menu_login")],
-        [InlineKeyboardButton("AI Mode", callback_data="menu_ai")],
-        [InlineKeyboardButton("Payment", callback_data="menu_payment")],
-        [InlineKeyboardButton("Welcome", callback_data="menu_welcome")],
-        [InlineKeyboardButton("Replies", callback_data="menu_replies")],
-        [InlineKeyboardButton("Add Reply", callback_data="add_reply_keyword")],
-        [InlineKeyboardButton("Batch Add Replies", callback_data="batch_add_replies")],
-        [InlineKeyboardButton("User-Specific Reply", callback_data="menu_user_reply")],
-        [InlineKeyboardButton("Delete Reply", callback_data="menu_del_reply")],
-        [InlineKeyboardButton("Accounts", callback_data="menu_accounts")],
-        [InlineKeyboardButton("Add Account (String)", callback_data="add_account_how")],
-        [InlineKeyboardButton("Settings", callback_data="menu_settings")],
-        [InlineKeyboardButton("Status", callback_data="menu_status")],
+        [InlineKeyboardButton("📱 Account Management", callback_data="menu_accounts")],
+        [InlineKeyboardButton("💬 Reply Management", callback_data="menu_reply_mgmt")],
+        [InlineKeyboardButton("🤖 AI Settings", callback_data="menu_ai")],
+        [InlineKeyboardButton("💰 Payment Settings", callback_data="menu_payment")],
+        [InlineKeyboardButton("👋 Welcome Message", callback_data="menu_welcome")],
+        [InlineKeyboardButton("⚙️ Other Settings", callback_data="menu_settings")],
+        [InlineKeyboardButton("📊 Status", callback_data="menu_status")],
     ]
     text = (
-        f"Shruti's Panel\n\n"
-        f"Active: {connected} | Restricted: {restricted}\n"
-        f"Model: {model}\n\n"
-        f"Select:"
+        f"✨ **Shruti's Control Panel** ✨\n\n"
+        f"📡 Active: {connected} | 🔴 Restricted: {restricted}\n"
+        f"🧠 Model: {model}\n\n"
+        f"👇 **Select an option:**"
     )
     if update.callback_query:
         await update.callback_query.edit_message_text(
-            text, reply_markup=InlineKeyboardMarkup(keyboard)
+            text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
         )
     else:
         await update.message.reply_text(
-            text, reply_markup=InlineKeyboardMarkup(keyboard)
+            text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
         )
 
 
@@ -712,43 +729,47 @@ async def msg_handler(update, context):
 
 
 async def add_account(update, context, session):
-    msg = await update.message.reply_text("Adding...")
+    msg = await update.message.reply_text("⏳ Adding account...")
     try:
         acc = await start_single_account(session)
         if acc and 'error' not in acc:
             await msg.edit_text(
-                f"Added!\n{acc['name']}\nID: {acc['id']}",
+                f"✅ **Account Added!**\n\n👤 {acc['name']}\n🆔 ID: {acc['id']}",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-                )
+                    [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+                ),
+                parse_mode='Markdown'
             )
         elif acc and acc.get('error') == 'restricted':
             await msg.edit_text(
-                "Account is RESTRICTED/Banned!\n\nAuto-logged out and disabled.",
+                "🚫 **Account is RESTRICTED/Banned!**\n\nAuto-logged out and disabled.",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-                )
+                    [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+                ),
+                parse_mode='Markdown'
             )
         else:
             await msg.edit_text(
-                "Failed!",
+                "❌ **Failed to add account!**",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-                )
+                    [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+                ),
+                parse_mode='Markdown'
             )
     except Exception as e:
         await msg.edit_text(
-            f"Failed: {str(e)[:200]}",
+            f"❌ **Failed:** {str(e)[:200]}",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+            ),
+            parse_mode='Markdown'
         )
 
 
 async def handle_text_input(update, context):
     text = update.message.text.strip()
     awaiting = context.user_data.get('awaiting', '')
-    back = InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="main_menu")]])
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]])
 
     if awaiting.startswith('login_phone_'):
         temp_key = awaiting.replace('login_phone_', '')
@@ -756,26 +777,30 @@ async def handle_text_input(update, context):
         if result['status'] == 'otp_sent':
             context.user_data['awaiting'] = f'login_otp_{temp_key}'
             await update.message.reply_text(
-                f"OTP sent to {text}\n\nEnter OTP code:",
-                reply_markup=back
+                f"📲 **OTP sent to** `{text}`\n\n✏️ **Enter OTP code:**",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
         elif result['status'] == 'flood':
             await update.message.reply_text(
-                f"Flood wait: {result.get('wait', '?')}s\n\nTry again later.",
-                reply_markup=back
+                f"⏳ **Flood wait:** {result.get('wait', '?')}s\n\nTry again later.",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
         elif result['status'] == 'already_logged':
             session = result['session']
             acc = await start_single_account(session)
             context.user_data['awaiting'] = ''
             await update.message.reply_text(
-                f"Already logged in as {result['user']}\n\nAccount added!",
-                reply_markup=back
+                f"✅ **Already logged in as** {result['user']}\n\nAccount added!",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
         else:
             await update.message.reply_text(
-                f"Error: {result['message']}",
-                reply_markup=back
+                f"❌ **Error:** {result['message']}",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
 
     elif awaiting.startswith('login_otp_'):
@@ -786,35 +811,41 @@ async def handle_text_input(update, context):
             session = result['session']
             context.user_data['awaiting'] = ''
             await update.message.reply_text(
-                f"Login Successful!\n{result['user']['name']}\n\nAdding account...",
-                reply_markup=back
+                f"✅ **Login Successful!**\n👤 {result['user']['name']}\n\n📦 Adding account...",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
             acc = await start_single_account(session)
             if acc and 'error' not in acc:
                 await update.message.reply_text(
-                    f"Account added: {acc['name']}",
-                    reply_markup=back
+                    f"✅ **Account added:** {acc['name']}",
+                    reply_markup=back,
+                    parse_mode='Markdown'
                 )
             else:
                 await update.message.reply_text(
-                    f"Account may be restricted. Check accounts menu.",
-                    reply_markup=back
+                    f"⚠️ Account may be restricted. Check accounts menu.",
+                    reply_markup=back,
+                    parse_mode='Markdown'
                 )
         elif result['status'] == '2fa_required':
             context.user_data['awaiting'] = f'login_2fa_{temp_key}'
             await update.message.reply_text(
-                f"2FA Password Required!\n\nEnter your 2FA password:",
-                reply_markup=back
+                f"🔐 **2FA Password Required!**\n\n✏️ Enter your 2FA password:",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
         elif result['status'] == 'restricted':
             await update.message.reply_text(
-                f"Account is RESTRICTED!\n\nCannot add this account.",
-                reply_markup=back
+                f"🚫 **Account is RESTRICTED!**\n\nCannot add this account.",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
         else:
             await update.message.reply_text(
-                f"Error: {result['message']}",
-                reply_markup=back
+                f"❌ **Error:** {result['message']}",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
 
     elif awaiting.startswith('login_2fa_'):
@@ -825,54 +856,90 @@ async def handle_text_input(update, context):
             session = result['session']
             context.user_data['awaiting'] = ''
             await update.message.reply_text(
-                f"2FA Verified!\n{result['user']['name']}\n\nAdding account...",
-                reply_markup=back
+                f"✅ **2FA Verified!**\n👤 {result['user']['name']}\n\n📦 Adding account...",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
             acc = await start_single_account(session)
             await update.message.reply_text(
-                f"Account added: {acc.get('name', '?')}",
-                reply_markup=back
+                f"✅ **Account added:** {acc.get('name', '?')}",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
         else:
             await update.message.reply_text(
-                f"Error: {result['message']}",
-                reply_markup=back
+                f"❌ **Error:** {result['message']}",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
 
     elif awaiting == 'upi_id':
         set_setting('upi_id', text)
         context.user_data['awaiting'] = ''
-        await update.message.reply_text(f"UPI: {text}", reply_markup=back)
+        await update.message.reply_text(
+            f"✅ **UPI ID Updated!**\n\n`{text}`",
+            reply_markup=back,
+            parse_mode='Markdown'
+        )
     elif awaiting == 'paytm_num':
         set_setting('paytm_num', text)
         context.user_data['awaiting'] = ''
-        await update.message.reply_text(f"PayTm: {text}", reply_markup=back)
+        await update.message.reply_text(
+            f"✅ **PayTm Number Updated!**\n\n`{text}`",
+            reply_markup=back,
+            parse_mode='Markdown'
+        )
     elif awaiting == 'prices':
         set_setting('price_list_text', text)
         context.user_data['awaiting'] = ''
-        await update.message.reply_text("Price list updated!", reply_markup=back)
-    elif awaiting == 'welcome_text':
-        set_setting('welcome_message', text)
+        await update.message.reply_text(
+            "✅ **Price List Updated!**",
+            reply_markup=back,
+            parse_mode='Markdown'
+        )
+    elif awaiting == 'welcome_msg1':
+        set_setting('welcome_message_1', text)
         context.user_data['awaiting'] = ''
-        await update.message.reply_text("Welcome message updated!", reply_markup=back)
+        await update.message.reply_text(
+            "✅ **Welcome Message 1 Updated!**",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_welcome")]
+            ]),
+            parse_mode='Markdown'
+        )
+    elif awaiting == 'welcome_msg2':
+        set_setting('welcome_message_2', text)
+        context.user_data['awaiting'] = ''
+        await update.message.reply_text(
+            "✅ **Welcome Message 2 Updated!**",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_welcome")]
+            ]),
+            parse_mode='Markdown'
+        )
     elif awaiting == 'keyword':
         context.user_data['add_keyword'] = text
         context.user_data['awaiting'] = 'reply_type'
         kb = [
-            [InlineKeyboardButton("Exact", callback_data="reply_type_exact")],
-            [InlineKeyboardButton("Contains", callback_data="reply_type_contains")],
-            [InlineKeyboardButton("Cancel", callback_data="main_menu")]
+            [InlineKeyboardButton("🎯 Exact Match", callback_data="reply_type_exact")],
+            [InlineKeyboardButton("🔍 Contains Match", callback_data="reply_type_contains")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="main_menu")]
         ]
         await update.message.reply_text(
-            f"Keyword: {text}\n\nMatch type:",
-            reply_markup=InlineKeyboardMarkup(kb)
+            f"📝 **Keyword:** `{text}`\n\n🔽 **Select match type:**",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='Markdown'
         )
     elif awaiting == 'reply_text':
         kw = context.user_data.get('add_keyword', '')
         tp = context.user_data.get('reply_type', 'exact')
         rid = add_reply(kw, text, tp)
         context.user_data['awaiting'] = ''
-        await update.message.reply_text(f"Reply added! (ID: {rid})", reply_markup=back)
+        await update.message.reply_text(
+            f"✅ **Reply Added!** (ID: `{rid}`)",
+            reply_markup=back,
+            parse_mode='Markdown'
+        )
     elif awaiting == 'batch_replies':
         lines = text.strip().split('\n')
         added = 0
@@ -896,20 +963,17 @@ async def handle_text_input(update, context):
                 rid = add_reply(kw, reply, rtype)
                 added += 1
         context.user_data['awaiting'] = ''
-        msg_txt = f"Batch Add Complete!\n\nAdded: {added}"
+        msg_txt = f"✅ **Batch Add Complete!**\n\n📝 Added: {added}"
         if errors:
-            msg_txt += f"\nErrors: {len(errors)}\n" + "\n".join(errors[:5])
-        await update.message.reply_text(msg_txt, reply_markup=back)
-    elif awaiting == 'default_reply_text':
-        set_setting('default_reply_text', text)
-        context.user_data['awaiting'] = ''
-        await update.message.reply_text("Default reply updated!", reply_markup=back)
+            msg_txt += f"\n❌ Errors: {len(errors)}\n" + "\n".join(errors[:5])
+        await update.message.reply_text(msg_txt, reply_markup=back, parse_mode='Markdown')
     elif awaiting == 'user_reply_keyword':
         context.user_data['user_reply_keyword'] = text
         context.user_data['awaiting'] = 'user_reply_userid'
         await update.message.reply_text(
-            f"Keyword: {text}\n\nNow enter the User ID for whom this reply should work:",
-            reply_markup=back
+            f"📝 **Keyword:** `{text}`\n\n👤 **Now enter the User ID** for whom this reply should work:",
+            reply_markup=back,
+            parse_mode='Markdown'
         )
     elif awaiting == 'user_reply_userid':
         try:
@@ -917,13 +981,15 @@ async def handle_text_input(update, context):
             context.user_data['user_reply_userid'] = user_id
             context.user_data['awaiting'] = 'user_reply_text'
             await update.message.reply_text(
-                f"User ID: {user_id}\n\nNow send the reply text:",
-                reply_markup=back
+                f"👤 **User ID:** `{user_id}`\n\n✏️ **Now send the reply text:**",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
         except:
             await update.message.reply_text(
-                "Invalid User ID. Send a numeric ID.",
-                reply_markup=back
+                "❌ **Invalid User ID.** Send a numeric ID.",
+                reply_markup=back,
+                parse_mode='Markdown'
             )
     elif awaiting == 'user_reply_text':
         kw = context.user_data.get('user_reply_keyword', '')
@@ -932,10 +998,26 @@ async def handle_text_input(update, context):
         rid = add_user_reply(uid, kw, reply_text, 'exact')
         context.user_data['awaiting'] = ''
         await update.message.reply_text(
-            f"User-Specific Reply Added!\n\n"
-            f"User: {uid}\nKeyword: {kw}\nReply ID: {rid}\n\n"
-            f"Note: This reply will only work for this specific user!",
-            reply_markup=back
+            f"✅ **User-Specific Reply Added!**\n\n"
+            f"👤 User: `{uid}`\n"
+            f"📝 Keyword: `{kw}`\n"
+            f"🆔 Reply ID: `{rid}`\n\n"
+            f"ℹ️ Note: This reply will only work for this specific user!",
+            reply_markup=back,
+            parse_mode='Markdown'
+        )
+    elif awaiting == 'ignore_keyword':
+        kw = text.strip().lower()
+        add_ignore_reply(kw)
+        context.user_data['awaiting'] = ''
+        await update.message.reply_text(
+            f"✅ **Ignore Reply Added!**\n\n"
+            f"🚫 Keyword: `{kw}`\n"
+            f"এই keyword থাকলে বট কোনো উত্তর দেবে না।",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")]
+            ]),
+            parse_mode='Markdown'
         )
 
 
@@ -954,12 +1036,14 @@ async def handle_contact_input(update, context):
             if result['status'] == 'otp_sent':
                 context.user_data['awaiting'] = f'login_otp_{temp_key}'
                 await update.message.reply_text(
-                    f"OTP sent to {phone}\n\nEnter OTP code:"
+                    f"📲 **OTP sent to** `{phone}`\n\n✏️ **Enter OTP code:**",
+                    parse_mode='Markdown'
                 )
             else:
                 context.user_data['awaiting'] = ''
                 await update.message.reply_text(
-                    f"Error: {result.get('message', 'Login failed')}"
+                    f"❌ **Error:** {result.get('message', 'Login failed')}",
+                    parse_mode='Markdown'
                 )
 
 
@@ -973,10 +1057,11 @@ async def handle_photo_input(update, context):
         set_setting('qr_code_path', "payment_assets/qr_code.jpg")
         context.user_data['awaiting'] = ''
         await update.message.reply_text(
-            "QR saved!",
+            "✅ **QR Code Saved!**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+            ),
+            parse_mode='Markdown'
         )
     elif awaiting == 'price_image':
         os.makedirs('payment_assets', exist_ok=True)
@@ -984,10 +1069,11 @@ async def handle_photo_input(update, context):
         set_setting('price_list_image', "payment_assets/price_list.jpg")
         context.user_data['awaiting'] = ''
         await update.message.reply_text(
-            "Price list image saved!",
+            "✅ **Price List Image Saved!**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+            ),
+            parse_mode='Markdown'
         )
     elif awaiting == 'welcome_image':
         os.makedirs('payment_assets', exist_ok=True)
@@ -995,10 +1081,11 @@ async def handle_photo_input(update, context):
         set_setting('welcome_image', "payment_assets/welcome_image.jpg")
         context.user_data['awaiting'] = ''
         await update.message.reply_text(
-            "Welcome image saved!",
+            "✅ **Welcome Image Saved!**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+            ),
+            parse_mode='Markdown'
         )
 
 
@@ -1011,18 +1098,65 @@ async def button_callback(update, context):
         await show_main_menu(update, context)
         return
 
+    elif data == "menu_accounts":
+        active = [a for a in accounts if a.get('enabled', True) and not a.get('restricted', False)]
+        restricted_list = [a for a in accounts if a.get('restricted', False)]
+        
+        msg = f"📱 **Account Management**\n\n"
+        msg += f"✅ Active: {len(active)}\n"
+        msg += f"🔴 Restricted: {len(restricted_list)}\n"
+        msg += f"📦 Total: {len(accounts)}\n\n"
+        
+        if not accounts:
+            msg += "❌ *No accounts added yet!*\n"
+        else:
+            for i, acc in enumerate(accounts):
+                is_restricted = acc.get('restricted', False)
+                is_enabled = acc.get('enabled', True)
+                if is_restricted:
+                    status_icon = "🔴"
+                elif is_enabled:
+                    status_icon = "✅"
+                else:
+                    status_icon = "⏸️"
+                mode = "🧠 AI" if acc.get('mode') == 'ai' else "🔑 KW"
+                name = acc.get('name', f"User{acc['id']}")
+                msg += f"\n{status_icon} `#{i+1}` **{name}** [{mode}]"
+                if is_restricted:
+                    msg += " 🚫RESTRICTED"
+        
+        kb = [
+            [InlineKeyboardButton("📲 Login with Phone", callback_data="menu_login")],
+            [InlineKeyboardButton("🔑 Add String Session", callback_data="add_account_how")],
+        ]
+        
+        for i, acc in enumerate(accounts):
+            if not acc.get('restricted', False):
+                status_text = "⏸️ Disable" if acc.get('enabled', True) else "▶️ Enable"
+                kb.append([
+                    InlineKeyboardButton(f"{status_text} #{i+1}", callback_data=f"tog_{i}"),
+                    InlineKeyboardButton(f"🗑️ Delete #{i+1}", callback_data=f"delacc_{i}")
+                ])
+        
+        kb.append([InlineKeyboardButton("🔙 Back", callback_data="main_menu")])
+        
+        await query.edit_message_text(
+            msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+
     elif data == "menu_login":
         kb = [
-            [InlineKeyboardButton("Send Phone Number", callback_data="login_send_phone")],
-            [InlineKeyboardButton("Share Contact", callback_data="login_share_contact")],
-            [InlineKeyboardButton("Back", callback_data="main_menu")]
+            [InlineKeyboardButton("📱 Type Phone Number", callback_data="login_send_phone")],
+            [InlineKeyboardButton("📲 Share Contact", callback_data="login_share_contact")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu_accounts")]
         ]
         await query.edit_message_text(
-            "Login with Phone Number\n\n"
-            "Option 1: Type your phone number (e.g., +91XXXXXXXXXX)\n"
-            "Option 2: Share your contact via Telegram\n\n"
-            "After OTP, you may need 2FA password if enabled.",
-            reply_markup=InlineKeyboardMarkup(kb)
+            "📲 **Login with Phone Number**\n\n"
+            "🔹 **Option 1:** Type your phone number (e.g., `+91XXXXXXXXXX`)\n"
+            "🔹 **Option 2:** Share your contact via Telegram\n\n"
+            "📌 After OTP, you may need 2FA password if enabled.",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='Markdown'
         )
 
     elif data == "login_send_phone":
@@ -1030,73 +1164,48 @@ async def button_callback(update, context):
         context.user_data['awaiting'] = f'login_phone_{temp_key}'
         context.user_data['temp_key'] = temp_key
         await query.edit_message_text(
-            "Send your phone number\n\n"
-            "Format: +91XXXXXXXXXX\n\n"
-            "Type the number with country code:",
+            "📱 **Send your phone number**\n\n"
+            "📌 Format: `+91XXXXXXXXXX`\n\n"
+            "✏️ Type the number with country code:",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Cancel", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("❌ Cancel", callback_data="main_menu")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "login_share_contact":
         context.user_data['awaiting'] = 'contact_login'
         await query.edit_message_text(
-            "Share your contact\n\n"
+            "📲 **Share your contact**\n\n"
             "Use the contact share button below to send your phone number:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Share Contact", callback_data="share_contact_btn")],
-                [InlineKeyboardButton("Cancel", callback_data="main_menu")]
-            ])
+                [InlineKeyboardButton("📲 Share Contact", callback_data="share_contact_btn")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="main_menu")]
+            ]),
+            parse_mode='Markdown'
         )
 
     elif data == "add_account_how":
         await query.edit_message_text(
-            "Add Account Methods\n\n"
-            "Method 1: Phone Login (New)\n"
-            "Use the login button from main menu.\n\n"
-            "Method 2: String Session\n"
+            "🔑 **Add Account Methods**\n\n"
+            "📌 **Method 1: Phone Login (New)**\n"
+            "Use the login button from accounts menu.\n\n"
+            "📌 **Method 2: String Session**\n"
             "Run this command locally:\n\n"
-            "pip install telethon && python -c \"from telethon.sync import TelegramClient; from telethon.sessions import StringSession; c = TelegramClient(StringSession(), 37362415, '88f99afa3b9a81adce62267b701e7b9f'); c.start(); print(c.session.save())\"\n\n"
-            "Paste the string here to add!",
+            "`pip install telethon && python -c \"from telethon.sync import TelegramClient; from telethon.sessions import StringSession; c = TelegramClient(StringSession(), 37362415, '88f99afa3b9a81adce62267b701e7b9f'); c.start(); print(c.session.save())\"`\n\n"
+            "📌 Paste the string here to add!",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_accounts")]]
+            ),
+            parse_mode='Markdown'
         )
 
-    elif data == "menu_accounts":
-        active = [a for a in accounts if a.get('enabled', True) and not a.get('restricted', False)]
-        restricted = [a for a in accounts if a.get('restricted', False)]
-        if not accounts:
-            await query.edit_message_text(
-                "No accounts!",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Login with Phone", callback_data="menu_login")],
-                    [InlineKeyboardButton("Add String", callback_data="add_account_how")],
-                    [InlineKeyboardButton("Back", callback_data="main_menu")]
-                ])
-            )
-            return
-        msg = f"Total: {len(accounts)}\nActive: {len(active)}\nRestricted: {len(restricted)}\n\n"
-        kb = []
-        for i, acc in enumerate(accounts):
-            is_restricted = acc.get('restricted', False)
-            s = "R" if is_restricted else ("A" if acc.get('enabled', True) else "D")
-            mode = "AI" if acc.get('mode') == 'ai' else "KW"
-            name = acc.get('name', f"User{acc['id']}")
-            status = " [RESTRICTED]" if is_restricted else ""
-            msg += f"{s} #{i+1} {name} [{mode}]{status}\n"
-            if not is_restricted:
-                kb.append([
-                    InlineKeyboardButton(
-                        f"{'Disable' if acc.get('enabled', True) else 'Enable'} #{i+1}",
-                        callback_data=f"tog_{i}"
-                    )
-                ])
-            kb.append([InlineKeyboardButton(f"Delete #{i+1}", callback_data=f"delacc_{i}")])
-        kb.append([InlineKeyboardButton("Login with Phone", callback_data="menu_login")])
-        kb.append([InlineKeyboardButton("Add String", callback_data="add_account_how")])
-        kb.append([InlineKeyboardButton("Back", callback_data="main_menu")])
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
+    elif data == "tog_":
+        idx = int(data.split("_")[1])
+        if 0 <= idx < len(accounts) and not accounts[idx].get('restricted', False):
+            accounts[idx]['enabled'] = not accounts[idx].get('enabled', True)
+            _save_sessions()
+        await button_callback(update, context)
 
     elif data.startswith("tog_"):
         idx = int(data.split("_")[1])
@@ -1110,19 +1219,21 @@ async def button_callback(update, context):
         if 0 <= idx < len(accounts):
             acc = accounts[idx]
             kb = [
-                [InlineKeyboardButton("Yes, Delete", callback_data=f"confirm_del_{idx}")],
-                [InlineKeyboardButton("Cancel", callback_data="menu_accounts")]
+                [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirm_del_{idx}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="menu_accounts")]
             ]
             await query.edit_message_text(
-                f"Confirm Delete\n\n{acc.get('name', 'Unknown')}\nID: {acc['id']}\n{'RESTRICTED' if acc.get('restricted') else 'Active'}\n\nSure?",
-                reply_markup=InlineKeyboardMarkup(kb)
+                f"🗑️ **Confirm Delete**\n\n👤 {acc.get('name', 'Unknown')}\n🆔 ID: {acc['id']}\n{'🚫 RESTRICTED' if acc.get('restricted') else '✅ Active'}\n\nSure?",
+                reply_markup=InlineKeyboardMarkup(kb),
+                parse_mode='Markdown'
             )
         else:
             await query.edit_message_text(
-                "Invalid account!",
+                "❌ Invalid account!",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Back", callback_data="menu_accounts")]]
-                )
+                    [[InlineKeyboardButton("🔙 Back", callback_data="menu_accounts")]]
+                ),
+                parse_mode='Markdown'
             )
 
     elif data.startswith("confirm_del_"):
@@ -1136,74 +1247,144 @@ async def button_callback(update, context):
             _save_sessions()
             _save_restricted()
             await query.edit_message_text(
-                f"Account Deleted!\n\n{acc.get('name', 'Unknown')}\nID: {acc['id']}",
+                f"🗑️ **Account Deleted!**\n\n👤 {acc.get('name', 'Unknown')}\n🆔 ID: {acc['id']}",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Accounts", callback_data="menu_accounts")]]
-                )
+                    [[InlineKeyboardButton("🔙 Accounts", callback_data="menu_accounts")]]
+                ),
+                parse_mode='Markdown'
             )
         else:
             await query.edit_message_text(
-                "Invalid index!",
+                "❌ Invalid index!",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-                )
+                    [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+                ),
+                parse_mode='Markdown'
             )
 
     elif data == "menu_welcome":
-        welcome_msg = get_setting('welcome_message', '')
-        if not welcome_msg:
-            welcome_msg = "Not set (default will be used)"
+        welcome_msg1 = get_setting('welcome_message_1', '')
+        welcome_msg2 = get_setting('welcome_message_2', '')
         welcome_img = get_setting('welcome_image', '')
-        has_img = "Yes" if (welcome_img and os.path.exists(welcome_img)) else "No"
-        msg = f"Welcome Settings\n\nMessage: {welcome_msg[:60]}...\nImage: {has_img}\n\nFirst message = welcome only!"
+        has_img = "✅ Yes" if (welcome_img and os.path.exists(welcome_img)) else "❌ No"
+        
+        if not welcome_msg1:
+            welcome_msg1 = "👋 **Welcome baby! Ready hoon main!**"
+        if not welcome_msg2:
+            welcome_msg2 = "💰 **Price List:**\n10 MIN VC = ₹99\n20 MIN VC = ₹119\nDEMO (2 MIN FULL NUDE) = ₹49\n\n💳 Pay karo baby, phir maza lo!"
+        
+        msg = f"👋 **Welcome Settings**\n\n"
+        msg += f"📝 **Message 1 (with pic):**\n{welcome_msg1[:50]}...\n\n"
+        msg += f"📝 **Message 2 (text only):**\n{welcome_msg2[:50]}...\n\n"
+        msg += f"🖼️ Image: {has_img}\n\n"
+        msg += f"✏️ **Select what to edit:**"
+        
         kb = [
-            [InlineKeyboardButton("Edit Welcome Text", callback_data="edit_welcome_text")],
-            [InlineKeyboardButton("Upload Welcome Image", callback_data="upload_welcome_image")],
-            [InlineKeyboardButton("Back", callback_data="main_menu")]
+            [InlineKeyboardButton("✏️ Edit Welcome Message 1", callback_data="edit_welcome_msg1")],
+            [InlineKeyboardButton("✏️ Edit Welcome Message 2", callback_data="edit_welcome_msg2")],
+            [InlineKeyboardButton("🖼️ Upload/Change Welcome Image", callback_data="upload_welcome_image")],
+            [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
         ]
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
-
-    elif data == "edit_welcome_text":
-        context.user_data['awaiting'] = 'welcome_text'
-        current = get_setting('welcome_message', '(Default)')
+        
         await query.edit_message_text(
-            f"Current Welcome Message:\n\n{current}\n\nSend new Welcome Message:",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_welcome")]]
-            )
+            msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+
+    elif data == "edit_welcome_msg1":
+        context.user_data['awaiting'] = 'welcome_msg1'
+        current = get_setting('welcome_message_1', '👋 Welcome baby! Ready hoon main!')
+        await query.edit_message_text(
+            f"✏️ **Edit Welcome Message 1**\n\n📝 **Current:**\n{current}\n\n📩 **Send new message 1:**",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_welcome")]
+            ]),
+            parse_mode='Markdown'
+        )
+
+    elif data == "edit_welcome_msg2":
+        context.user_data['awaiting'] = 'welcome_msg2'
+        current = get_setting('welcome_message_2', '💰 Price List...')
+        await query.edit_message_text(
+            f"✏️ **Edit Welcome Message 2**\n\n📝 **Current:**\n{current}\n\n📩 **Send new message 2:**",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_welcome")]
+            ]),
+            parse_mode='Markdown'
         )
 
     elif data == "upload_welcome_image":
         context.user_data['awaiting'] = 'welcome_image'
         await query.edit_message_text(
-            "Send Welcome Image:",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_welcome")]]
-            )
+            "🖼️ **Send Welcome Image:**",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_welcome")]
+            ]),
+            parse_mode='Markdown'
+        )
+
+    elif data == "menu_reply_mgmt":
+        reply_count = get_reply_count()
+        user_reply_count = get_user_reply_count()
+        ignore_count = len(get_all_ignore_replies())
+        
+        msg = f"💬 **Reply Management**\n\n"
+        msg += f"📝 Global Replies: {reply_count}\n"
+        msg += f"👤 User-Specific Replies: {user_reply_count}\n"
+        msg += f"🚫 Ignored Keywords: {ignore_count}\n\n"
+        msg += f"👇 **Select an option:**"
+        
+        kb = [
+            [InlineKeyboardButton("📝 Add Reply", callback_data="add_reply_keyword")],
+            [InlineKeyboardButton("➕ Batch Add Replies", callback_data="batch_add_replies")],
+            [InlineKeyboardButton("👤 User-Specific Reply", callback_data="menu_user_reply")],
+            [InlineKeyboardButton("📋 List/Delete Replies", callback_data="menu_del_reply")],
+            [InlineKeyboardButton("🚫 Ignore Reply (No Answer)", callback_data="menu_ignore_reply")],
+            [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
+        ]
+        
+        await query.edit_message_text(
+            msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
+
+    elif data == "menu_ignore_reply":
+        context.user_data['awaiting'] = 'ignore_keyword'
+        await query.edit_message_text(
+            "🚫 **Ignore Reply Setup**\n\n"
+            "ইগনোর করার জন্য keyword পাঠাও।\n"
+            "এই keyword থাকলে বট কোনো উত্তর দেবে না।\n\n"
+            "✏️ **Keyword পাঠাও:**",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")]
+            ]),
+            parse_mode='Markdown'
         )
 
     elif data == "menu_ai":
         ai_count = sum(1 for a in accounts if a.get('mode') == 'ai' and not a.get('restricted', False))
         model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
-        msg = f"AI Mode\n\nAI Active: {ai_count}/{len([a for a in accounts if not a.get('restricted')])}\nModel: {model}"
+        msg = f"🤖 **AI Settings**\n\n"
+        msg += f"🧠 AI Active: {ai_count}/{len([a for a in accounts if not a.get('restricted')])}\n"
+        msg += f"📦 Model: `{model}`\n\n"
+        msg += f"👇 **Select:**"
         kb = [
-            [InlineKeyboardButton("Start AI", callback_data="ai_start")],
-            [InlineKeyboardButton("Keyword Mode", callback_data="ai_stop")],
-            [InlineKeyboardButton("Change Model", callback_data="change_model")],
-            [InlineKeyboardButton("Reset Counters", callback_data="reset_counters")],
-            [InlineKeyboardButton("Back", callback_data="main_menu")]
+            [InlineKeyboardButton("🧠 Start AI Mode", callback_data="ai_start")],
+            [InlineKeyboardButton("🔑 Switch to Keyword Mode", callback_data="ai_stop")],
+            [InlineKeyboardButton("🔄 Change Model", callback_data="change_model")],
+            [InlineKeyboardButton("🔄 Reset Counters", callback_data="reset_counters")],
+            [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
         ]
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data == "ai_start":
         for acc in accounts:
             if not acc.get('restricted', False):
                 acc['mode'] = 'ai'
         await query.edit_message_text(
-            "AI Mode Started!",
+            "✅ **AI Mode Started!**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_ai")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_ai")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "ai_stop":
@@ -1211,112 +1392,129 @@ async def button_callback(update, context):
             if not acc.get('restricted', False):
                 acc['mode'] = 'keyword'
         await query.edit_message_text(
-            "Keyword Mode!",
+            "🔑 **Keyword Mode Active!**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "reset_counters":
         customer_count.clear()
         _processing.clear()
         await query.edit_message_text(
-            "Counters reset!",
+            "🔄 **Counters Reset!**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_ai")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_ai")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "change_model":
         kb = [
-            [InlineKeyboardButton("GPT-4o Mini", callback_data="model_openai/gpt-4o-mini")],
-            [InlineKeyboardButton("GPT-4o", callback_data="model_openai/gpt-4o")],
-            [InlineKeyboardButton("Gemini 2.0 Flash", callback_data="model_google/gemini-2.0-flash-exp")],
-            [InlineKeyboardButton("Llama 3.3 70B", callback_data="model_meta-llama/llama-3.3-70b-instruct")],
-            [InlineKeyboardButton("Back", callback_data="menu_ai")]
+            [InlineKeyboardButton("🧠 GPT-4o Mini", callback_data="model_openai/gpt-4o-mini")],
+            [InlineKeyboardButton("🧠 GPT-4o", callback_data="model_openai/gpt-4o")],
+            [InlineKeyboardButton("🧠 Gemini 2.0 Flash", callback_data="model_google/gemini-2.0-flash-exp")],
+            [InlineKeyboardButton("🧠 Llama 3.3 70B", callback_data="model_meta-llama/llama-3.3-70b-instruct")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu_ai")]
         ]
-        await query.edit_message_text("Select Model", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(
+            "🔄 **Select Model**",
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data.startswith("model_"):
         model = data.replace("model_", "")
         set_setting('openrouter_model', model)
         await query.edit_message_text(
-            f"Model: {model}",
+            f"✅ **Model Updated!**\n\n`{model}`",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_ai")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_ai")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "menu_payment":
-        upi = get_setting('upi_id', 'Not set')
-        paytm = get_setting('paytm_num', 'Not set')
+        upi = get_setting('upi_id', '❌ Not set')
+        paytm = get_setting('paytm_num', '❌ Not set')
         qr_path = get_setting('qr_code_path', '')
-        has_qr = os.path.exists(qr_path) if qr_path else False
-        msg = f"PAYMENT\n\nUPI: {upi}\nPayTm: {paytm}\nQR: {'Yes' if has_qr else 'No'}"
+        has_qr = "✅ Yes" if (qr_path and os.path.exists(qr_path)) else "❌ No"
+        
+        msg = f"💰 **Payment Settings**\n\n"
+        msg += f"🏦 UPI ID: `{upi}`\n"
+        msg += f"📱 PayTm: `{paytm}`\n"
+        msg += f"📸 QR Code: {has_qr}\n\n"
+        msg += f"👇 **Select:**"
+        
         kb = [
-            [InlineKeyboardButton("Set UPI", callback_data="set_upi")],
-            [InlineKeyboardButton("Set PayTm", callback_data="set_paytm")],
-            [InlineKeyboardButton("Upload QR", callback_data="upload_qr")],
-            [InlineKeyboardButton("Edit Price", callback_data="edit_prices")],
-            [InlineKeyboardButton("Price Image", callback_data="upload_price_image")],
-            [InlineKeyboardButton("Back", callback_data="main_menu")]
+            [InlineKeyboardButton("🏦 Set UPI ID", callback_data="set_upi")],
+            [InlineKeyboardButton("📱 Set PayTm Number", callback_data="set_paytm")],
+            [InlineKeyboardButton("📸 Upload QR Code", callback_data="upload_qr")],
+            [InlineKeyboardButton("📝 Edit Price List Text", callback_data="edit_prices")],
+            [InlineKeyboardButton("🖼️ Upload Price List Image", callback_data="upload_price_image")],
+            [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
         ]
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data == "set_upi":
         context.user_data['awaiting'] = 'upi_id'
         await query.edit_message_text(
-            "Send UPI ID:",
+            "✏️ **Send UPI ID:**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_payment")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_payment")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "set_paytm":
         context.user_data['awaiting'] = 'paytm_num'
         await query.edit_message_text(
-            "Send PayTm Number:",
+            "✏️ **Send PayTm Number:**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_payment")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_payment")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "upload_qr":
         context.user_data['awaiting'] = 'qr_code'
         await query.edit_message_text(
-            "Send QR Photo:",
+            "📸 **Send QR Photo:**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_payment")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_payment")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "edit_prices":
         context.user_data['awaiting'] = 'prices'
         current = get_setting('price_list_text', DEFAULT_PRICE_LIST)
         await query.edit_message_text(
-            f"Current:\n{current}\n\nSend new price text:",
+            f"📝 **Current Price List:**\n{current}\n\n✏️ **Send new price text:**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_payment")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_payment")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "upload_price_image":
         context.user_data['awaiting'] = 'price_image'
         await query.edit_message_text(
-            "Send Price list photo:",
+            "🖼️ **Send Price List Photo:**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_payment")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_payment")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "menu_replies":
         replies = get_all_replies()
         if not replies:
             await query.edit_message_text(
-                "No replies!",
+                "❌ **No replies found!**",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-                )
+                    [[InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")]]
+                ),
+                parse_mode='Markdown'
             )
             return
         page = int(context.user_data.get('reply_page', 0))
@@ -1325,21 +1523,21 @@ async def button_callback(update, context):
         start = page * per_page
         end = start + per_page
         page_list = replies[start:end]
-        msg = f"Page {page+1}/{total}\n\n"
+        msg = f"📋 **Replies - Page {page+1}/{total}**\n\n"
         for r in page_list:
             rid, kw, rt, tp = r
-            e = "Exact" if tp == "exact" else "Contains"
-            msg += f"ID:{rid} {kw[:20]}\n  -> {rt[:35]}... ({e})\n\n"
+            e = "🎯 Exact" if tp == "exact" else "🔍 Contains"
+            msg += f"🆔 `{rid}` | `{kw[:20]}`\n  ➜ {rt[:35]}... ({e})\n\n"
         kb = []
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("Prev", callback_data=f"rp_{page-1}"))
+            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"rp_{page-1}"))
         if page < total - 1:
-            nav.append(InlineKeyboardButton("Next", callback_data=f"rp_{page+1}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"rp_{page+1}"))
         if nav:
             kb.append(nav)
-        kb.append([InlineKeyboardButton("Back", callback_data="main_menu")])
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb))
+        kb.append([InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")])
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data.startswith("rp_"):
         context.user_data['reply_page'] = int(data.split("_")[1])
@@ -1348,162 +1546,173 @@ async def button_callback(update, context):
     elif data == "add_reply_keyword":
         context.user_data['awaiting'] = 'keyword'
         await query.edit_message_text(
-            "Send keyword:\n\nExample: price, kaha karu, scan",
+            "📝 **Add Reply**\n\n✏️ **Send keyword:**\n\nExample: `price`, `kaha karu`, `scan`",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "reply_type_exact":
         context.user_data['reply_type'] = 'exact'
         context.user_data['awaiting'] = 'reply_text'
         await query.edit_message_text(
-            "Send reply text:",
+            "✏️ **Send reply text:**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "reply_type_contains":
         context.user_data['reply_type'] = 'contains'
         context.user_data['awaiting'] = 'reply_text'
         await query.edit_message_text(
-            "Send reply text:",
+            "✏️ **Send reply text:**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "batch_add_replies":
         context.user_data['awaiting'] = 'batch_replies'
         await query.edit_message_text(
-            "Batch Add Replies\n\n"
-            "Format per line:\n"
-            "keyword | reply text | match_type\n\n"
-            "Match type: exact or contains (default: contains)\n\n"
-            "Example:\n"
-            "price | 99 for 10 min | exact\n"
-            "scan | Scan karo baby | contains\n"
-            "hello | Hi baby, kya chahiye? | exact\n\n"
-            "Send all lines at once!",
+            "➕ **Batch Add Replies**\n\n"
+            "📌 **Format per line:**\n"
+            "`keyword | reply text | match_type`\n\n"
+            "📌 Match type: `exact` or `contains` (default: contains)\n\n"
+            "**Example:**\n"
+            "```\nprice | 99 for 10 min | exact\nscan | Scan karo baby | contains\nhello | Hi baby, kya chahiye? | exact\n```\n\n"
+            "📩 **Send all lines at once!**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "menu_user_reply":
         kb = [
-            [InlineKeyboardButton("Add User-Specific Reply", callback_data="add_user_reply")],
-            [InlineKeyboardButton("List User Replies", callback_data="list_user_replies")],
-            [InlineKeyboardButton("Back", callback_data="main_menu")]
+            [InlineKeyboardButton("➕ Add User-Specific Reply", callback_data="add_user_reply")],
+            [InlineKeyboardButton("📋 List User Replies", callback_data="list_user_replies")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")]
         ]
         await query.edit_message_text(
-            "User-Specific Replies\n\n"
-            "You can add replies that ONLY work for specific users.\n"
+            "👤 **User-Specific Replies**\n\n"
+            "You can add replies that **ONLY** work for specific users.\n"
             "Other users won't trigger these replies.\n\n"
             "Useful for giving different responses to different customers!",
-            reply_markup=InlineKeyboardMarkup(kb)
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='Markdown'
         )
 
     elif data == "add_user_reply":
         context.user_data['awaiting'] = 'user_reply_keyword'
         await query.edit_message_text(
-            "Add User-Specific Reply\n\n"
-            "Enter the keyword that should trigger the reply:",
+            "👤 **Add User-Specific Reply**\n\n"
+            "✏️ **Enter the keyword** that should trigger the reply:",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_user_reply")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_user_reply")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "list_user_replies":
         user_replies = get_all_user_replies()
         if not user_replies:
             await query.edit_message_text(
-                "No user-specific replies!\n\nAdd one from the menu.",
+                "📭 **No user-specific replies!**",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Back", callback_data="menu_user_reply")]]
-                )
+                    [[InlineKeyboardButton("🔙 Back", callback_data="menu_user_reply")]]
+                ),
+                parse_mode='Markdown'
             )
             return
-        msg = "User-Specific Replies\n\n"
+        msg = "👤 **User-Specific Replies**\n\n"
         kb = []
         for rid, uid, kw, rt, tp in user_replies[:20]:
-            msg += f"ID:{rid} | User:{uid} | {kw[:15]}\n  -> {rt[:30]}...\n\n"
+            msg += f"🆔 `{rid}` | 👤 User:`{uid}` | `{kw[:15]}`\n  ➜ {rt[:30]}...\n\n"
             kb.append(
-                [InlineKeyboardButton(f"Delete ID:{rid} (User:{uid})", callback_data=f"del_user_reply_{rid}")]
+                [InlineKeyboardButton(f"🗑️ Delete ID {rid} (User:{uid})", callback_data=f"del_user_reply_{rid}")]
             )
-        kb.append([InlineKeyboardButton("Back", callback_data="menu_user_reply")])
-        await query.edit_message_text(msg[:4000], reply_markup=InlineKeyboardMarkup(kb))
+        kb.append([InlineKeyboardButton("🔙 Back", callback_data="menu_user_reply")])
+        await query.edit_message_text(msg[:3500], reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data.startswith("del_user_reply_"):
         rid = int(data.split("_")[3])
         kb = [
-            [InlineKeyboardButton("Yes", callback_data=f"confirm_del_user_{rid}")],
-            [InlineKeyboardButton("No", callback_data="list_user_replies")]
+            [InlineKeyboardButton("✅ Yes", callback_data=f"confirm_del_user_{rid}")],
+            [InlineKeyboardButton("❌ No", callback_data="list_user_replies")]
         ]
         await query.edit_message_text(
-            f"Delete user reply ID {rid}?",
-            reply_markup=InlineKeyboardMarkup(kb)
+            f"🗑️ **Delete user reply ID `{rid}`?**",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='Markdown'
         )
 
     elif data.startswith("confirm_del_user_"):
         rid = int(data.split("_")[3])
         result = delete_user_reply(rid)
         await query.edit_message_text(
-            "Deleted!" if result else "Not found!",
+            "✅ **Deleted!**" if result else "❌ **Not found!**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_user_reply")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_user_reply")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "menu_del_reply":
         replies = get_all_replies()
         if not replies:
             await query.edit_message_text(
-                "No replies!",
+                "📭 **No replies!**",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-                )
+                    [[InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")]]
+                ),
+                parse_mode='Markdown'
             )
             return
-        kb = [[InlineKeyboardButton(f"ID:{r[0]} {r[1][:15]}", callback_data=f"cd_{r[0]}")] for r in replies[:10]]
-        kb.append([InlineKeyboardButton("Back", callback_data="main_menu")])
-        await query.edit_message_text("Select to delete:", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [[InlineKeyboardButton(f"🗑️ ID:{r[0]} - {r[1][:15]}", callback_data=f"cd_{r[0]}")] for r in replies[:15]]
+        kb.append([InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")])
+        await query.edit_message_text("🗑️ **Select reply to delete:**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data.startswith("cd_"):
         rid = int(data.split("_")[1])
         await query.edit_message_text(
-            f"Delete ID {rid}?",
+            f"🗑️ **Delete reply ID `{rid}`?**",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Yes", callback_data=f"dd_{rid}")],
-                [InlineKeyboardButton("No", callback_data="menu_del_reply")]
-            ])
+                [InlineKeyboardButton("✅ Yes", callback_data=f"dd_{rid}")],
+                [InlineKeyboardButton("❌ No", callback_data="menu_del_reply")]
+            ]),
+            parse_mode='Markdown'
         )
 
     elif data.startswith("dd_"):
         rid = int(data.split("_")[1])
-        status = "Deleted!" if delete_reply(rid) else "Not found!"
+        status = "✅ **Deleted!**" if delete_reply(rid) else "❌ **Not found!**"
         await query.edit_message_text(
             status,
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_reply_mgmt")]]
+            ),
+            parse_mode='Markdown'
         )
 
     elif data == "menu_settings":
-        w = 'On' if get_setting('welcome_enabled', '1') == '1' else 'Off'
-        bp = 'On' if get_setting('block_photo_enabled', '1') == '1' else 'Off'
-        t = 'On' if get_setting('typing_enabled', '1') == '1' else 'Off'
+        w = '✅ On' if get_setting('welcome_enabled', '1') == '1' else '❌ Off'
+        bp = '✅ On' if get_setting('block_photo_enabled', '1') == '1' else '❌ Off'
+        t = '✅ On' if get_setting('typing_enabled', '1') == '1' else '❌ Off'
         tt = int(get_setting('typing_duration', '3'))
-        dr = 'On' if get_setting('default_reply_enabled', '0') == '1' else 'Off'
         kb = [
-            [InlineKeyboardButton(f"Welcome {w}", callback_data="tw")],
-            [InlineKeyboardButton(f"Block Photo {bp}", callback_data="tbp")],
-            [InlineKeyboardButton(f"Typing {t} ({tt}s)", callback_data="stt")],
-            [InlineKeyboardButton(f"Default {dr}", callback_data="tdr")],
-            [InlineKeyboardButton("Back", callback_data="main_menu")]
+            [InlineKeyboardButton(f"👋 Welcome {w}", callback_data="tw")],
+            [InlineKeyboardButton(f"🚫 Block Photo {bp}", callback_data="tbp")],
+            [InlineKeyboardButton(f"⌨️ Typing {t} ({tt}s)", callback_data="stt")],
+            [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
         ]
-        await query.edit_message_text("Settings", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text(
+            f"⚙️ **Settings**\n\n👋 Welcome: {w}\n🚫 Block Photo: {bp}\n⌨️ Typing: {t} ({tt}s)",
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown'
+        )
 
     elif data == "tw":
         cur = get_setting('welcome_enabled', '1')
@@ -1517,66 +1726,60 @@ async def button_callback(update, context):
 
     elif data == "stt":
         kb = [
-            [InlineKeyboardButton("2s", callback_data="tt_2"), InlineKeyboardButton("3s", callback_data="tt_3"), InlineKeyboardButton("5s", callback_data="tt_5")],
-            [InlineKeyboardButton("7s", callback_data="tt_7"), InlineKeyboardButton("10s", callback_data="tt_10"), InlineKeyboardButton("15s", callback_data="tt_15")],
-            [InlineKeyboardButton("Back", callback_data="menu_settings")]
+            [InlineKeyboardButton("2s ⏱️", callback_data="tt_2"), InlineKeyboardButton("3s ⏱️", callback_data="tt_3"), InlineKeyboardButton("5s ⏱️", callback_data="tt_5")],
+            [InlineKeyboardButton("7s ⏱️", callback_data="tt_7"), InlineKeyboardButton("10s ⏱️", callback_data="tt_10"), InlineKeyboardButton("15s ⏱️", callback_data="tt_15")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu_settings")]
         ]
-        await query.edit_message_text("Typing Duration", reply_markup=InlineKeyboardMarkup(kb))
+        await query.edit_message_text("⏱️ **Typing Duration**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data.startswith("tt_"):
         set_setting('typing_duration', data.split("_")[1])
         await query.edit_message_text(
-            f"Typing: {data.split('_')[1]}s",
+            f"✅ **Typing: {data.split('_')[1]}s**",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="menu_settings")]]
-            )
+                [[InlineKeyboardButton("🔙 Back", callback_data="menu_settings")]]
+            ),
+            parse_mode='Markdown'
         )
-
-    elif data == "tdr":
-        cur = get_setting('default_reply_enabled', '0')
-        set_setting('default_reply_enabled', '0' if cur == '1' else '1')
-        await button_callback(update, context)
 
     elif data == "menu_status":
         active = [a for a in accounts if a.get('enabled', True) and not a.get('restricted', False)]
-        restricted = [a for a in accounts if a.get('restricted', False)]
+        restricted_list = [a for a in accounts if a.get('restricted', False)]
         model = get_setting('openrouter_model', 'openai/gpt-4o-mini')
         ai_active = sum(1 for a in active if a.get('mode') == 'ai')
         tt = int(get_setting('typing_duration', '3'))
-        typing_st = 'On' if get_setting('typing_enabled', '1') == '1' else 'Off'
-        bp_st = 'On' if get_setting('block_photo_enabled', '1') == '1' else 'Off'
+        typing_st = '✅ On' if get_setting('typing_enabled', '1') == '1' else '❌ Off'
+        bp_st = '✅ On' if get_setting('block_photo_enabled', '1') == '1' else '❌ Off'
 
         accs = "\n".join([
-            f"{'A' if a.get('enabled', True) else 'D'} #{i + 1} {a['name']} {'AI' if a.get('mode') == 'ai' else 'KW'} {'R' if a.get('restricted') else ''}"
+            f"{'✅' if a.get('enabled', True) else '⏸️'} #{i+1} {a['name']} {'🧠AI' if a.get('mode') == 'ai' else '🔑KW'}{' 🚫R' if a.get('restricted') else ''}"
             for i, a in enumerate(accounts)
-        ]) or "No accounts"
+        ]) or "❌ No accounts"
 
-        msg = f"STATUS\n\n"
-        msg += f"Total: {len(accounts)} | Active: {len(active)} | Restricted: {len(restricted)}\n"
-        msg += f"{accs}\n\n"
-        msg += f"AI Mode: {ai_active}/{len(active)}\n"
-        msg += f"Model: {model}\n"
-        msg += f"Global Replies: {get_reply_count()}\n"
-        msg += f"User Replies: {get_user_reply_count()}\n"
-        msg += f"Total Chats: {len(customer_count)}\n"
-        msg += f"Typing: {typing_st} | {tt}s\n"
-        msg += f"Block Photo: {bp_st}"
+        msg = f"📊 **STATUS**\n\n"
+        msg += f"📦 Total: {len(accounts)} | ✅ Active: {len(active)} | 🔴 Restricted: {len(restricted_list)}\n"
+        msg += f"━━━━━━━━━━━━━━\n{accs}\n━━━━━━━━━━━━━━\n"
+        msg += f"🧠 AI Mode: {ai_active}/{len(active)}\n"
+        msg += f"📦 Model: `{model}`\n"
+        msg += f"📝 Global Replies: {get_reply_count()}\n"
+        msg += f"👤 User Replies: {get_user_reply_count()}\n"
+        msg += f"💬 Total Chats: {len(customer_count)}\n"
+        msg += f"⌨️ Typing: {typing_st} | {tt}s\n"
+        msg += f"🚫 Block Photo: {bp_st}"
 
         await query.edit_message_text(
             msg,
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Back", callback_data="main_menu")]]
-            )
+                [[InlineKeyboardButton("🔄 Refresh", callback_data="menu_status"), InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+            ),
+            parse_mode='Markdown'
         )
-
-
-# ===== WEBHOOK & FLASK =====
-@flask_app.route('/webhook', methods=['POST'])
+        @flask_app.route('/webhook', methods=['POST'])
 def webhook_handler():
     global application, _loop
 
     if application is None or _loop is None:
-        logger.error("Application not ready yet!")
+        logger.error("❌ Application not ready yet!")
         return "Bot not ready", 503
 
     try:
@@ -1588,15 +1791,15 @@ def webhook_handler():
             _loop
         )
         try:
-            future.result(timeout=10)
+            future.result(timeout=25)
         except TimeoutError:
-            logger.warning("Process update timed out")
+            logger.warning("⏳ Process update timed out")
         except Exception as e:
-            logger.warning(f"Process update error: {e}")
+            logger.warning(f"⚠️ Process update error: {e}")
 
         return "OK", 200
     except Exception as e:
-        logger.error(f"Webhook error: {e}", exc_info=True)
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
         return f"Error: {str(e)}", 500
 
 
@@ -1650,16 +1853,14 @@ async def setup_webhook():
             }
         )
         data = resp.json()
-        logger.info(f"Webhook setup: {data}")
+        logger.info(f"🌐 Webhook setup: {data}")
         return data.get("ok", False)
-
-
-async def run_bot():
+        async def run_bot():
     global _bot_started, application, _loop
 
     logger.info("=" * 50)
-    logger.info("BOT STARTING...")
-    logger.info(f"Python version: {sys.version}")
+    logger.info("🚀 BOT STARTING...")
+    logger.info(f"🐍 Python version: {sys.version}")
     logger.info("=" * 50)
 
     if os.path.exists(LOCK_FILE):
@@ -1669,7 +1870,7 @@ async def run_bot():
             if old_pid and old_pid.isdigit():
                 try:
                     os.kill(int(old_pid), 0)
-                    logger.warning(f"Another instance (PID {old_pid}) running! Exiting.")
+                    logger.warning(f"⚠️ Another instance (PID {old_pid}) running! Exiting.")
                     return
                 except ProcessLookupError:
                     pass
@@ -1680,17 +1881,17 @@ async def run_bot():
         f.write(str(os.getpid()))
 
     if _bot_started:
-        logger.warning("Bot already started! Skipping...")
+        logger.warning("⚠️ Bot already started! Skipping...")
         return
     _bot_started = True
 
     init_db()
-    logger.info("Database ready")
+    logger.info("✅ Database ready")
     get_ai_bot()
 
     webhook_ok = await setup_webhook()
     if not webhook_ok:
-        logger.error("Failed to set webhook!")
+        logger.error("❌ Failed to set webhook!")
 
     await start_all_accounts()
     asyncio.create_task(keep_alive())
@@ -1707,8 +1908,8 @@ async def run_bot():
     await application.initialize()
     await application.start()
 
-    logger.info(f"Bot running on webhook mode!")
-    logger.info(f"Webhook URL: {WEBHOOK_URL}")
+    logger.info(f"🤖 Bot running on webhook mode!")
+    logger.info(f"🌐 Webhook URL: {WEBHOOK_URL}")
 
     try:
         await asyncio.Event().wait()
@@ -1729,7 +1930,7 @@ async def run_bot():
 
 
 async def error_handler(update, context):
-    logger.error(f"Bot error: {context.error}")
+    logger.error(f"❌ Bot error: {context.error}")
 
 
 async def keep_alive():
@@ -1753,18 +1954,18 @@ def start_bot_async():
     """Run the bot in a background thread with its own event loop."""
     global _bot_started, _loop
     if _bot_started:
-        logger.warning("Bot already started, skipping...")
+        logger.warning("⚠️ Bot already started, skipping...")
         return
 
-    logger.info("Starting bot in background thread...")
+    logger.info("🚀 Starting bot in background thread...")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    _loop = loop  # CRITICAL FIX
+    _loop = loop
 
     try:
         loop.run_until_complete(run_bot())
     except Exception as e:
-        logger.error(f"Bot thread error: {e}", exc_info=True)
+        logger.error(f"❌ Bot thread error: {e}", exc_info=True)
     finally:
         try:
             loop.close()
@@ -1772,7 +1973,7 @@ def start_bot_async():
             pass
         _bot_started = False
         _loop = None
-        logger.info("Bot thread ended")
+        logger.info("🏁 Bot thread ended")
 
 
 def run_flask_with_bot():
@@ -1780,28 +1981,28 @@ def run_flask_with_bot():
     global _bot_started
 
     logger.info("=" * 50)
-    logger.info("Starting Shruti Bot System...")
+    logger.info("🚀 Starting Shruti Bot System...")
     logger.info("=" * 50)
 
     try:
         init_db()
-        logger.info("Database initialized successfully")
+        logger.info("✅ Database initialized successfully")
     except Exception as e:
-        logger.error(f"Database init error: {e}")
+        logger.error(f"❌ Database init error: {e}")
 
     try:
         get_ai_bot()
-        logger.info("AI Bot initialized successfully")
+        logger.info("✅ AI Bot initialized successfully")
     except Exception as e:
-        logger.error(f"AI Bot init error: {e}")
+        logger.error(f"❌ AI Bot init error: {e}")
 
     # Start bot in background thread
-    logger.info("Launching bot thread...")
+    logger.info("🚀 Launching bot thread...")
     bot_thread = Thread(target=start_bot_async, daemon=True)
     bot_thread.start()
-    sleep(10)
+    sleep(15)
 
-    logger.info("Bot thread launched, now starting Flask server...")
+    logger.info("✅ Bot thread launched, now starting Flask server...")
 
     # Run Flask (blocking)
     port = int(os.environ.get('PORT', 10000))

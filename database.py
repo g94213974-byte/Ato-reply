@@ -37,3 +37,16 @@ def is_ignored_keyword(text):
         if row[0].lower() in text_lower:
             return True
     return False
+def init_db():
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS ignore_replies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        keyword TEXT UNIQUE
+    )
+    """)
+
+    conn.commit()
+    conn.close()

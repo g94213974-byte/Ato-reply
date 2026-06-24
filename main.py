@@ -17,10 +17,10 @@ from telegram.ext import Application, ApplicationBuilder, MessageHandler, Callba
 from telegram.error import Conflict
 
 from telethon import TelegramClient, events, errors
+from telethon import TelegramClient, events, errors
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import BlockRequest, DeleteContactsRequest
-from telethon.tl.functions.messages import ReadHistoryRequest, GetDialogMessagesRequest
-from telethon.tl.types import InputPhoneContact
+from telethon.tl.functions.messages import ReadHistoryRequest
 from telethon.errors import PhoneNumberAppSignupForbiddenError, PhoneCodeInvalidError, PhoneCodeExpiredError, SessionPasswordNeededError, UserRestrictedError, FloodWaitError
 
 from database import init_db, get_setting, set_setting, add_reply, delete_reply, get_all_replies, get_reply_count, add_user_reply, get_user_specific_replies, delete_user_reply, get_all_user_replies, get_user_reply_count

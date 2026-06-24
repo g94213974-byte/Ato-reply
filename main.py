@@ -1770,12 +1770,29 @@ async def button_callback(update, context):
         await query.edit_message_text(
             msg,
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔄 Refresh", callback_data="menu_status"), InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
+                [[InlineKeyboardButton("🔄 Refresh", callback_data="menu_status"),
+                  InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
             ),
             parse_mode='Markdown'
         )
-        @flask_app.route('/webhook', methods=['POST'])
+
+
+@flask_app.route('/webhook', methods=['POST'])
 def webhook_handler():
+    global application, _loop
+
+    if application is None or _loop is None:
+        logger.error("❌ Application not ready yet!")
+        return "Bot not ready", 503
+
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, application.bot)
+
+        future = asyncio.run_coroutine_threadsafe(
+            application.process_update(update),
+            _loop
+        )
     global application, _loop
 
     if application is None or _loop is None:

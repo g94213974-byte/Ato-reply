@@ -1778,6 +1778,7 @@ async def button_callback(update, context):
 
 
 @flask_app.route('/webhook', methods=['POST'])
+@flask_app.route('/webhook', methods=['POST'])
 def webhook_handler():
     global application, _loop
 
@@ -1793,7 +1794,19 @@ def webhook_handler():
             application.process_update(update),
             _loop
         )
-    global application, _loop
+
+        try:
+            future.result(timeout=25)
+        except TimeoutError:
+            logger.warning("⏳ Process update timed out")
+        except Exception as e:
+            logger.warning(f"⚠️ Process update error: {e}")
+
+        return "OK", 200
+
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        return f"Error: {str(e)}", 500
 
     if application is None or _loop is None:
         logger.error("❌ Application not ready yet!")
@@ -1872,7 +1885,9 @@ async def setup_webhook():
         data = resp.json()
         logger.info(f"🌐 Webhook setup: {data}")
         return data.get("ok", False)
-        async def run_bot():
+
+
+async def run_bot():
     global _bot_started, application, _loop
 
     logger.info("=" * 50)

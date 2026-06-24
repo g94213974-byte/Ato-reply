@@ -24,7 +24,7 @@ logger.info("wsgi.py: AI Bot initialized")
 logger.info("wsgi.py: Starting bot thread...")
 bot_thread = Thread(target=start_bot_async, daemon=True)
 bot_thread.start()
-sleep(10)
+sleep(15)  # বট fully initialize হওয়ার জন্য অপেক্ষা
 logger.info("wsgi.py: Bot thread started, gunicorn serving Flask...")
 
 # Gunicorn will use 'flask_app' as the WSGI application

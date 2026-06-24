@@ -1509,7 +1509,5 @@ def run_main():
 
 
 if __name__ == "__main__":
-    if "worker" in sys.argv:
-        run_main()
-    else:
-        run_flask_with_bot()
+    # Only for local development
+    run_flask_with_bot()

@@ -1318,7 +1318,14 @@ async def setup_webhook():
 async def run_bot():
     global _bot_started, application, _loop
     
+    logger.info("=" * 50)
+    logger.info("BOT STARTING...")
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"Platform: {sys.platform}")
+    logger.info("=" * 50)
+    
     _loop = asyncio.get_event_loop()
+    # ... বাকি কোড)
     
     if os.path.exists(LOCK_FILE):
         try:

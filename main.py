@@ -1446,14 +1446,43 @@ def run_main():
             pass
 
 
+def start_bot_async():
+    """Run the bot in a background thread with its own event loop."""
+    global _bot_started
+    if _bot_started:
+        return
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(run_bot())
+    except Exception as e:
+        logger.error(f"Bot thread error: {e}", exc_info=True)
+    finally:
+        loop.close()
+        _bot_started = False
+
+
+def run_flask_with_bot():
+    """Initialize DB, start bot thread, then run Flask."""
+    global _bot_started
+    
+    init_db()
+    logger.info("Database initialized")
+    get_ai_bot()
+    
+    # Start bot in background thread
+    bot_thread = Thread(target=start_bot_async, daemon=True)
+    bot_thread.start()
+    sleep(5)  # Give bot time to start
+    
+    # Run Flask (blocking)
+    flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)), debug=False, use_reloader=False)
+
+
 if __name__ == "__main__":
-    import sys
     if "worker" in sys.argv:
         run_main()
     else:
-        Thread(target=run_flask, daemon=True).start()
-        sleep(3)
-        try:
-            asyncio.run(run_bot())
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
+        run_flask_with_bot()

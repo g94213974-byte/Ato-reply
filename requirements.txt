@@ -1,5 +1,6 @@
-flask>=3.0.0
-python-telegram-bot>=20.7
 telethon>=1.36.0
-httpx>=0.25.2,<0.26.0
+python-telegram-bot>=20.0
 gunicorn>=21.2.0
+flask>=3.0.0
+httpx>=0.24.0
+requests>=2.31.0
